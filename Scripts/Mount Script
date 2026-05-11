@@ -205,7 +205,7 @@ if [[ "$NZB_MOUNT_ALIVE" == "false" ]]; then
       --buffer-size "$RAM_BUFFER" --vfs-read-chunk-size "$CHUNK_START" --vfs-read-chunk-size-limit "$CHUNK_LIMIT" \
       --vfs-read-chunk-streams "$STREAMS" --transfers "$TRANSFERS" --dir-cache-time "$CACHE_TIME" --attr-timeout "$ATTR_TIME" \
       --uid 99 --gid 100 --umask 000 \
-      --read-only --no-modtime --no-checksum --async-read --links --use-cookies --allow-other \
+      --no-modtime --no-checksum --async-read --links --use-cookies --allow-other \
       $RC_ARGS --log-level NOTICE --log-file "$LOG_FILE" > /dev/null 2>&1 &
           
     disown $!
