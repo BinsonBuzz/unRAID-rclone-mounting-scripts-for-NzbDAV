@@ -1,9 +1,9 @@
 #!/bin/bash
 # ======================================================================================
 # SCRIPT: Rclone Heartbeat & Intelligent Priming
-# VERSION: v1.0-RC1.6.4
+# VERSION: v1.0-RC2.0.6
 # DESCRIPTION: Monitors Rclone mounts and performs "Smart Priming".
-#               v1.6.4: Added Bazarr and dynamic directory/extension exclusions.
+#               v2.0.6: Clears N mountpath if not empty
 # ======================================================================================
 
 # --------------------------------------------------------------------------------------
@@ -11,49 +11,38 @@
 # --------------------------------------------------------------------------------------
 
 # --- SCRIPT SETTINGS ---
-SCRIPT_VERSION="v1.0-RC1.6.4"
-HARD_RESET="N"                                                                                  # Y/N.
-# A Hard reset stops rclone, wipes cache, stops dockers, and exits.
-MAX_LOAD="350"                                                                                  # Reporting threshold (Load-based kills removed in v1.6.1)
-MAX_FAILURES="5"                                                                                # How many times to allow the mount check to fail before automatically applying a Hard Reset
-PRIME_MAX_TIME="60"                                                                             # Time to spend priming the --dir-cache on each run.
-STATE_FILE="/mnt/user/appdata/other/scripts/nzbdav/prime_state.db"
-LOG_FILE="/mnt/user/appdata/other/scripts/nzbdav/rclone_mount.log"
+SCRIPT_VERSION="v1.0-RC2.0.6"
+STATE_FILE="/mnt/user/appdata/other/scripts/rclone/prime_state.db"
+LOG_FILE="/mnt/user/appdata/other/scripts/rclone/rclone_mount.log"
 
 # --- REQUIRED SETTINGS ---
-REMOTE_NAME="nzb-dav:"                                                                          # Rclone remote name including colon
+REMOTE_NAME="nzb-dav:"                                                                           # Rclone remote name including colon
 RCLONE_CONF="/boot/config/plugins/rclone/.rclone.conf"
-MOUNT_PATH="/mnt/computers/streaming/nzbdav"                                                    # full path to where remote should be mounted
-VFS_CACHE_DIR="/mnt/computers/streaming/cache/nzbdav"                                           # Path for rclone cache files
-VFS_CACHE_SIZE="300G"                                                                           # Maximum size of the VFS cache
-LOCAL_MEDIA_PATH="/mnt/computers/media"                                                         # Where your media is stored
+MOUNT_PATH="/mnt/computers/streaming/nzbdav"                                                     # full path to where remote should be mounted
+VFS_CACHE_DIR="/mnt/computers/streaming/cache/nzbdav"                                            # Path for rclone cache files
+VFS_CACHE_SIZE="200G"                                                                            # Maximum size of the VFS cache
 
-VFS_MODE="full"                                                                                 # --vfs-cache-mode mode.
-CHUNK_START="8M"                                                                                # --vfs-read-chunk-size.
-CHUNK_LIMIT="512M"                                                                              # --vfs-read-chunk-size-limit.
-STREAMS="0"                                                                                     # --vfs-read-chunk-streams.
-RAM_BUFFER="256M"                                                                               # --buffer-size RAM buffer.
-TRANSFERS="8"                                                                                   # --transfers.
-CACHE_TIME="2000h"                                                                              # --dir-cache-time.
-ATTR_TIME="2000h"                                                                               # --attr-timeout.
+VFS_MODE="full"                                                                                  # --vfs-cache-mode mode.
+CHUNK_START="8M"                                                                                 # --vfs-read-chunk-size.
+CHUNK_LIMIT="1024M"                                                                               # --vfs-read-chunk-size-limit.
+STREAMS="0"                                                                                      # --vfs-read-chunk-streams.
+RAM_BUFFER="256M"                                                                                # --buffer-size RAM buffer.
+TRANSFERS="8"                                                                                    # --transfers.
+CACHE_TIME="2000h"                                                                               # --dir-cache-time.
+ATTR_TIME="2000h"                                                                                # --attr-timeout.
 
 # --- OPTIONAL MOUNT SETTINGS ---
-DECYPH_PATH="/mnt/computers/streaming/decypharr"                                                # Location of your Decypharr mount
-RC_IP="0.0.0.0"                                                                                 #
-RC_PORT="5572"                                                                                  #
-RC_USER="your_username"   
-RC_PASS="your_password"
-CPU_PIN="8,9,10,11,12,13,24,25,26,27,28,29"                                                     
+DECYPH_PATH="/mnt/computers/streaming/decypharr"                                                 # Location of your Decypharr mount
+RC_IP="0.0.0.0"                                                                                  #
+RC_PORT="5572"                                                                                   #
+RC_USER="username"   
+RC_PASS="password"
+CPU_PIN="12,13,14,15,28,29,30,31"                                                      
 
 # --- DOCKER SETTINGS ---
 NZBDAV_CONTAINER="NzbDAV"
 DECYPHAR_CONTAINER="Decypharr"
-ENABLERS="byparr prowlarr postgresql16"                                                         #
-CONSUMERS="sonarr radarr lidarr Sportarr bookshelf bazarr"
-
-# --- EXCLUSION SETTINGS ---
-EXCLUDE_DIRS="/photos /books /plex /local"                                                      # Space-separated list of subfolders to skip
-EXCLUDE_EXTS=".srt .ass .vtt"                                                                   # Space-separated list of extensions to skip
+CONTAINERS="byparr prowlarr postgresql16 sonarr radarr lidarr Sportarr bookshelf bazarr plex emby tautulli Seerr Wizarr"
 
 # --------------------------------------------------------------------------------------
 # 2. MAIN SCRIPT
@@ -68,390 +57,218 @@ send_notification() {
     /usr/local/emhttp/webGui/scripts/notify -e "Rclone Heartbeat" -s "$subject" -d "$message" -i "$importance"
 }
 
-ALL_CONSUMERS="$CONSUMERS"
-ALL_MANAGED_DOCKERS="$NZBDAV_CONTAINER $DECYPHAR_CONTAINER $ENABLERS $ALL_CONSUMERS"
-
 # --- SECTION 2.1: SUMMARY ---
 log_step "VALIDATING: Script configuration and environment..."
-echo "---------------------------------------------------"
-echo "[CONFIG SUMMARY]"
-echo "Script Version:      $SCRIPT_VERSION"
-echo "Rclone Remote:       $REMOTE_NAME"
-echo "State File:          $STATE_FILE"
-echo "Hard Reset Toggle:   $HARD_RESET"
-echo ""
-echo "[RCLONE PERFORMANCE]"
-echo "VFS Mode:            $VFS_MODE"
-echo "RAM Buffer:          $RAM_BUFFER"
-echo "Transfers:           $TRANSFERS"
-echo "Read Streams:        $STREAMS"
-echo "CHUNK START:         $CHUNK_START"
-echo "Chunk Limit:         $CHUNK_LIMIT"
-echo ""
-echo "[DOCKER SETTINGS]"
-echo "NzbDAV Container:    $NZBDAV_CONTAINER"
-echo "Decypharr Container: $DECYPHAR_CONTAINER"
-echo "Enabler Containers:  $ENABLERS"
-echo "Consumer Containers: $CONSUMERS"
-echo "---------------------------------------------------"
+log_step "---------------------------------------------------"
+log_step "[CONFIG SUMMARY]"
+log_step "Script Version:      $SCRIPT_VERSION"
+log_step "Rclone Remote:       $REMOTE_NAME"
+log_step "State File:          $STATE_FILE"
+log_step ""
+log_step "[RCLONE PERFORMANCE]"
+log_step "VFS Mode:            $VFS_MODE"
+log_step "RAM Buffer:          $RAM_BUFFER"
+log_step "Transfers:           $TRANSFERS"
+log_step "Read Streams:        $STREAMS"
+log_step "CHUNK START:         $CHUNK_START"
+log_step "Chunk Limit:         $CHUNK_LIMIT"
+log_step ""
+log_step "[DOCKER SETTINGS]"
+log_step "NzbDAV Container:    $NZBDAV_CONTAINER"
+log_step "Decypharr Container: $DECYPHAR_CONTAINER"
+log_step "Other Containers:    $CONTAINERS"
+log_step "---------------------------------------------------"
 
 # --- SECTION 2.2: ENVIRONMENTAL READINESS ---
-if [[ "$HARD_RESET" == "N" ]]; then
-    log_step "VERIFYING: System environment and load..."
-    mkdir -p "$(dirname "$STATE_FILE")"                                            
-    mkdir -p "$(dirname "$LOG_FILE")"
-    mkdir -p "$VFS_CACHE_DIR"
-
-    CURRENT_LOAD=$(cat /proc/loadavg | awk '{print $1}' | cut -d. -f1)
-    PATIENCE_MULT=1
-    if [ "$CURRENT_LOAD" -gt 80 ]; then
-        log_step "PATIENCE: High load detected ($CURRENT_LOAD). Doubling timeouts."
-        PATIENCE_MULT=2
-    fi
-else
-    mkdir -p "$VFS_CACHE_DIR"
-fi
+log_step "VERIFYING: System environment..."
+mkdir -p "$(dirname "$STATE_FILE")"                                             
+mkdir -p "$(dirname "$LOG_FILE")"
+mkdir -p "$VFS_CACHE_DIR"
 
 # --- SECTION 2.3: FOUNDATION CHECK ---
-FOUNDATION_RESTARTED=false
-for container in "$NZBDAV_CONTAINER" "$DECYPHAR_CONTAINER" $ENABLERS; do
-    if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" != "true" ]; then
-        log_step "[!] $container is down. Starting..."
-        docker start "$container" > /dev/null 2>&1
-        FOUNDATION_RESTARTED=true
+log_step "Ensuring Core services are active..."
+for container in "$NZBDAV_CONTAINER" "$DECYPHAR_CONTAINER"; do
+    if [[ -n "$container" ]]; then
+        if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" != "true" ]; then
+            log_step "Starting $container..."
+            docker start "$container" > /dev/null 2>&1
+        fi
     fi
 done
 
-if [[ "$FOUNDATION_RESTARTED" == "true" ]]; then
-    log_step "WAITING: Giving foundation containers 15s to initialize..."
-    sleep 15
+# --- SECTION 2.4: NZBDAV MOUNT AUDIT ---
+[ -f "$STATE_FILE" ] && source "$STATE_FILE"
+VALIDATION_FILE="$MOUNT_PATH/README"
+
+log_step "CHECKING: NzbDAV Mount integrity..."
+NZB_MOUNT_ALIVE=false
+
+# Check if process is running and mount is visible in system
+if [ "$(docker inspect -f '{{.State.Running}}' "$NZBDAV_CONTAINER" 2>/dev/null)" == "true" ] && \
+   grep -q "$MOUNT_PATH" /etc/mtab; then
+    
+    N_COUNT=0
+    while [ $N_COUNT -lt 5 ]; do
+        if timeout 5s ls "$VALIDATION_FILE" > /dev/null 2>&1; then
+            NZB_MOUNT_ALIVE=true
+            log_step "Passed: NzbDAV is UP."
+            break
+        fi
+        log_step "WAITING: NzbDAV mount stalling (Attempt $((N_COUNT + 1))/5)..."
+        sleep 6
+        ((N_COUNT++))
+    done
+else
+    log_step "[!] NzbDAV process/mount missing. Bypassing patience window..."
 fi
 
-# --- SECTION 2.4: INDEPENDENT MOUNT VALIDATION ---
-[ -f "$STATE_FILE" ] && source "$STATE_FILE"
-N_CUR_FAIL=${N_FAIL_COUNT:-0}
-VALIDATION_SUBFOLDER="$MOUNT_PATH/completed-symlinks"
-
-if [[ "$HARD_RESET" == "N" ]]; then
-    log_step "CHECKING: NzbDAV Mount integrity..."
-    NZB_MOUNT_ALIVE=false
-    
-    # Pre-check (Binary Failure check)
-    if [ "$(docker inspect -f '{{.State.Running}}' "$NZBDAV_CONTAINER" 2>/dev/null)" == "true" ] && \
-       grep -q "$MOUNT_PATH" /etc/mtab; then
-        
-        # Initial Patience (Loop 5)
-        N_COUNT=0
-        while [ $N_COUNT -lt 5 ]; do
-            if timeout $((5 * PATIENCE_MULT))s ls "$VALIDATION_SUBFOLDER" > /dev/null 2>&1; then
-                NZB_MOUNT_ALIVE=true
-                log_step "Passed: NzbDAV is UP."
-                break
-            fi
-            log_step "WAITING: NzbDAV mount stalling (Attempt $((N_COUNT + 1))/5)..."
-            sleep $((6 * PATIENCE_MULT))
-            ((N_COUNT++))
-        done
-    else
-        log_step "[!] NzbDAV process/mount missing. Bypassing patience window..."
-    fi
-
-    if [[ "$NZB_MOUNT_ALIVE" == "true" ]]; then
-        if [[ "$NZB_STATE" != "UP" ]]; then
-            NZB_STATE="UP"
-            NZB_START_TS=$(date +%s)
-        fi
-        echo "N_FAIL_COUNT=0" > "$STATE_FILE"
-        N_CUR_FAIL=0
-    else
-        log_step "[!] Failed: NzbDAV is DOWN."
-        send_notification "Mount Down" "NzbDAV mount integrity check failed at $MOUNT_PATH" "alert"
-        if [[ "$NZB_STATE" != "DOWN" ]]; then
-            NZB_STATE="DOWN"
-            NZB_START_TS=$(date +%s)
-        fi
-    fi
-
-    if [[ -n "$DECYPH_PATH" ]]; then
-        log_step "CHECKING: Decypharr Mount integrity..."
-        DEC_MOUNT_ALIVE=false
-        
-        # Pre-check (Binary Failure check)
-        if [ "$(docker inspect -f '{{.State.Running}}' "$DECYPHAR_CONTAINER" 2>/dev/null)" == "true" ]; then
-            # Initial Patience (Loop 5)
-            D_COUNT=0
-            while [ $D_COUNT -lt 5 ]; do
-                if { timeout $((5 * PATIENCE_MULT))s ls -d "$DECYPH_PATH/__all__" > /dev/null 2>&1 && timeout $((5 * PATIENCE_MULT))s ls "$DECYPH_PATH/version.txt" > /dev/null 2>&1;
-                }; then
-                    DEC_MOUNT_ALIVE=true
-                    log_step "Passed: Decypharr is UP."
-                    break
-                fi
-                log_step "WAITING: Decypharr mount not ready (Attempt $((D_COUNT + 1))/5)..."
-                sleep $((6 * PATIENCE_MULT))
-                ((D_COUNT++))
-            done
-        else
-            log_step "[!] Decypharr container is dead. Bypassing patience window..."
-        fi
-
-        if [[ "$DEC_MOUNT_ALIVE" == "false" ]]; then
-            log_step "[!] Failed: Decypharr is DOWN. Entering Recovery..."
-            
-            # Stop consumers before attempting container restart
-            for container in $ALL_CONSUMERS; do
-                if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" == "true" ]; then
-                    log_step "Stopping Consumer: $container..."
-                    docker stop "$container" > /dev/null 2>&1
-                fi
-            done
-            
-            log_step "FIX: Restarting $DECYPHAR_CONTAINER..."
-            docker restart "$DECYPHAR_CONTAINER" > /dev/null 2>&1
-            DEC_START_TS=$(date +%s)
-            
-            # Post-Fix Patience (Loop 5)
-            D_POST_COUNT=0
-            while [ $D_POST_COUNT -lt 5 ]; do
-                if { timeout $((5 * PATIENCE_MULT))s ls -d "$DECYPH_PATH/__all__" > /dev/null 2>&1 && timeout $((5 * PATIENCE_MULT))s ls "$DECYPH_PATH/version.txt" > /dev/null 2>&1;
-                }; then
-                    DEC_MOUNT_ALIVE=true
-                    log_step "RECOVERY: Decypharr is UP after restart."
-                    break
-                fi
-                log_step "WAITING: Decypharr stabilizing (Attempt $((D_POST_COUNT + 1))/5)..."
-                sleep $((6 * PATIENCE_MULT))
-                ((D_POST_COUNT++))
-            done
-            
-            if [[ "$DEC_MOUNT_ALIVE" == "false" ]]; then
-                log_step "[!] CRITICAL: Decypharr recovery failed."
-                send_notification "Mount Down" "Decypharr recovery failed at $DECYPH_PATH." "alert"
-            fi
-        fi
-
-        if [[ "$DEC_MOUNT_ALIVE" == "true" ]]; then
-            if [[ "$DEC_STATE" != "UP" ]]; then
-                DEC_STATE="UP"
-                DEC_START_TS=$(date +%s)
-            fi
-        else
-            if [[ "$DEC_STATE" != "DOWN" ]]; then
-                DEC_STATE="DOWN"
-                DEC_START_TS=$(date +%s)
-            fi
-        fi
+# Update NzbDAV State
+if [[ "$NZB_MOUNT_ALIVE" == "true" ]]; then
+    if [[ "$NZB_STATE" != "UP" ]]; then
+        NZB_STATE="UP"
+        NZB_START_TS=$(date +%s)
     fi
 else
-    NZB_MOUNT_ALIVE=false
+    log_step "[!] Failed: NzbDAV is DOWN."
+    send_notification "Mount Down" "NzbDAV mount failure at $MOUNT_PATH" "alert"
+    if [[ "$NZB_STATE" != "DOWN" ]]; then
+        NZB_STATE="DOWN"
+        NZB_START_TS=$(date +%s)
+    fi
 fi
 
-# --- SECTION 3.1: MOUNT RECOVERY LOOP ---
-RECOVERY_FAILED=false
-if [[ "$HARD_RESET" == "N" ]] && [[ "$NZB_MOUNT_ALIVE" == "false" ]]; then
-    log_step "REBUILD: Attempting Rclone mount recovery..."
+# --- SECTION 2.5: DECYPHARR MOUNT AUDIT (ELEGANT PAUSE) ---
+DEC_MOUNT_ALIVE=false
+if [[ -n "$DECYPH_PATH" ]] && [[ -n "$DECYPHAR_CONTAINER" ]]; then
+    log_step "CHECKING: Decypharr Mount integrity..."
     
-    # Safety Stop: Shut down consumers before touching the mount
-    for container in $ALL_CONSUMERS; do
-        if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" == "true" ]; then
-            log_step "Stopping Consumer: $container..."
-            docker stop "$container" > /dev/null 2>&1
+    D_COUNT=0
+    while [ $D_COUNT -lt 5 ]; do
+        # PASSIVE CHECK: Only look for the file. No forced restarts/docker starts here.
+        if [ "$(docker inspect -f '{{.State.Running}}' "$DECYPHAR_CONTAINER" 2>/dev/null)" == "true" ] && \
+           timeout 5s ls "$DECYPH_PATH/version.txt" > /dev/null 2>&1; then
+            DEC_MOUNT_ALIVE=true
+            log_step "Passed: Decypharr is UP."
+            break
         fi
+        
+        log_step "WAITING: Decypharr mount not ready/responsive (Attempt $((D_COUNT + 1))/5)..."
+        sleep 6
+        ((D_COUNT++))
     done
     
-    grep -q "$MOUNT_PATH" /etc/mtab && umount -l "$MOUNT_PATH" > /dev/null 2>&1
+    if [[ "$DEC_MOUNT_ALIVE" == "true" ]]; then
+        if [[ "$DEC_STATE" != "UP" ]]; then
+            DEC_STATE="UP"
+            DEC_START_TS=$(date +%s)
+        fi
+    else
+        log_step "[!] Decypharr is DOWN."
+        if [[ "$DEC_STATE" != "DOWN" ]]; then
+            DEC_STATE="DOWN"
+            DEC_START_TS=$(date +%s)
+        fi
+    fi
+fi
+
+# --- SECTION 3.0: NZBDAV RECOVERY & FUSE CLEANUP ---
+if [[ "$NZB_MOUNT_ALIVE" == "false" ]]; then
+    log_step "REBUILD: Initiating In-Place Rclone recovery..."
     
-    log_step "CLEANUP: Clearing RC port ${RC_PORT} before mount..."
+    # Force unmount stale points without stopping the foundation container
+    grep -q "$MOUNT_PATH" /etc/mtab && umount -l "$MOUNT_PATH" > /dev/null 2>&1
     fuser -k ${RC_PORT}/tcp > /dev/null 2>&1
+    
+    # Prevents "CRITICAL: Fatal error: ... is not empty" race condition
+    if [ -d "$MOUNT_PATH" ] && [ "$(ls -A "$MOUNT_PATH" 2>/dev/null)" ]; then
+        log_step "WARN: Stray files found in $MOUNT_PATH (likely created by Arrs). Wiping for clean mount..."
+        
+        # Safely remove contents to clear the path for Rclone
+        rm -rf "$MOUNT_PATH"/*
+        
+        if [ $? -eq 0 ]; then
+            log_step "SUCCESS: Target folder cleared."
+        else
+            log_step "ERROR: Could not clear $MOUNT_PATH. Rclone may fail."
+        fi
+    fi
+    
     sleep 2
 
     RC_ARGS="--rc --rc-addr ${RC_IP}:${RC_PORT} --rc-user ${RC_USER} --rc-pass ${RC_PASS}"
     LAUNCHER="taskset -c $CPU_PIN"
 
+    log_step "Launching Rclone Mount..."
     nohup $LAUNCHER rclone mount "$REMOTE_NAME" "$MOUNT_PATH" \
       --config "$RCLONE_CONF" --vfs-cache-mode "$VFS_MODE" --cache-dir "$VFS_CACHE_DIR" \
       --vfs-cache-max-size "$VFS_CACHE_SIZE" \
       --buffer-size "$RAM_BUFFER" --vfs-read-chunk-size "$CHUNK_START" --vfs-read-chunk-size-limit "$CHUNK_LIMIT" \
       --vfs-read-chunk-streams "$STREAMS" --transfers "$TRANSFERS" --dir-cache-time "$CACHE_TIME" --attr-timeout "$ATTR_TIME" \
-      --no-modtime --no-checksum --async-read --links --use-cookies --allow-other \
-      $RC_ARGS --log-level INFO --log-file "$LOG_FILE" > /dev/null 2>&1 &
+      --uid 99 --gid 100 --umask 000 \
+      --read-only --no-modtime --no-checksum --async-read --links --use-cookies --allow-other \
+      $RC_ARGS --log-level NOTICE --log-file "$LOG_FILE" > /dev/null 2>&1 &
           
     disown $!
-# Post-Fix Patience (Loop 5)
+
+    # --- SECTION 3.1: POST-FIX STABILIZATION ---    
     COUNT=0
     while [ $COUNT -lt 5 ]; do
-        if timeout $((5 * PATIENCE_MULT))s ls "$VALIDATION_SUBFOLDER" > /dev/null 2>&1; then
+        if timeout 5s ls "$VALIDATION_FILE" > /dev/null 2>&1; then
             log_step "SUCCESS: Mount stabilized."
-            send_notification "Mount Success" "NzbDAV mount has been successfully restored and stabilized." "normal"
+            send_notification "Mount Success" "NzbDAV mount restored." "normal"
             NZB_STATE="UP"
             NZB_START_TS=$(date +%s)
-            {
-                echo "N_FAIL_COUNT=0"
-                echo "NZB_STATE=\"$NZB_STATE\""
-                echo "NZB_START_TS=\"$NZB_START_TS\""
-                echo "DEC_STATE=\"$DEC_STATE\""
-                echo "DEC_START_TS=\"$DEC_START_TS\""
-                echo "TOTAL_CS_PRIMED=${TOTAL_CS_PRIMED:-0}"
-                echo "TOTAL_LMP_PRIMED=${TOTAL_LMP_PRIMED:-0}"
-            } > "$STATE_FILE"
             NZB_MOUNT_ALIVE=true
-            RECOVERY_FAILED=false
             break
         fi
         log_step "WAITING: Mount stabilizing (Attempt $((COUNT + 1))/5)..."
-        sleep $((6 * PATIENCE_MULT))
+        sleep 6
         ((COUNT++))
     done
-
-    if [[ "$NZB_MOUNT_ALIVE" == "false" ]]; then
-        RECOVERY_FAILED=true
-        N_CUR_FAIL=$((N_CUR_FAIL + 1))
-        {
-            echo "N_FAIL_COUNT=$N_CUR_FAIL"
-            echo "NZB_STATE=\"$NZB_STATE\""
-            echo "NZB_START_TS=\"$NZB_START_TS\""
-            echo "DEC_STATE=\"$DEC_STATE\""
-            echo "DEC_START_TS=\"$DEC_START_TS\""
-            echo "TOTAL_CS_PRIMED=${TOTAL_CS_PRIMED:-0}"
-            echo "TOTAL_LMP_PRIMED=${TOTAL_LMP_PRIMED:-0}"
-        } > "$STATE_FILE"
-    fi
-fi
-
-# --- SECTION 3.2: THE UNIFIED NUCLEAR JUNCTION ---
-TRIGGER_HARD_RESET=false
-if [[ "$HARD_RESET" == "Y" ]]; then
-    log_step "MANUAL RESET: Executing requested purge..."
-    TRIGGER_HARD_RESET=true
-elif [[ "$RECOVERY_FAILED" == "true" ]] && [[ "$N_CUR_FAIL" -ge "$MAX_FAILURES" ]]; then
-    log_step "[CRITICAL] Recovery failed and threshold ($MAX_FAILURES) reached."
-    TRIGGER_HARD_RESET=true
-fi
-
-if [[ "$TRIGGER_HARD_RESET" == "true" ]]; then
-    log_step "NUCLEAR OPTION: Executing full environment purge..."
-    send_notification "Forced Reset" "A forced reset has been triggered. Restarting all services." "alert"
-    for container in $ALL_CONSUMERS; do
-        if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" == "true" ]; then
-            log_step "Stopping Consumer: $container..."
-            docker stop "$container" > /dev/null 2>&1
-        fi
-    done
-    log_step "Restarting Foundation Containers..."
-    docker restart "$NZBDAV_CONTAINER" > /dev/null 2>&1
-    [ -n "$DECYPHAR_CONTAINER" ] && docker restart "$DECYPHAR_CONTAINER" > /dev/null 2>&1
-    log_step "Killing Rclone processes and forcing unmounts..."
-    ps aux | grep "rclone mount $REMOTE_NAME" | grep -v grep | awk '{print $2}' | xargs kill -9 > /dev/null 2>&1
-    umount -l "$MOUNT_PATH" > /dev/null 2>&1
-    [ -n "$DECYPH_PATH" ] && umount -l "$DECYPH_PATH" > /dev/null 2>&1
-    
-    if [[ "$HARD_RESET" == "Y" ]]; then
-        log_step "Wiping VFS Cache contents at $VFS_CACHE_DIR..."
-        rm -rf "$VFS_CACHE_DIR"/*
-    fi
-
-    NZB_STATE="DOWN"
-    NZB_START_TS=$(date +%s)
-    DEC_STATE="DOWN"
-    DEC_START_TS=$(date +%s)
-    {
-        echo "N_FAIL_COUNT=0"
-        echo "NZB_STATE=\"$NZB_STATE\""
-        echo "NZB_START_TS=\"$NZB_START_TS\""
-        echo "DEC_STATE=\"$DEC_STATE\""
-        echo "DEC_START_TS=\"$DEC_START_TS\""
-        echo "TOTAL_CS_PRIMED=0"
-        echo "TOTAL_LMP_PRIMED=0"
-    } > "$STATE_FILE"
-    log_step "SUCCESS: Nuclear Cleanup complete. Counter reset. EXITING."
-    exit 0
 fi
 
 if [[ "$NZB_MOUNT_ALIVE" == "false" ]]; then
-    log_step "[ABORT] Mount recovery failed. Threshold not yet reached ($N_CUR_FAIL/$MAX_FAILURES). Exiting."
+    log_step "[ABORT] Mount recovery failed. Exiting."
     exit 1
 fi
 
-# --- SECTION 4: PRIMING & RESTORATION ---
-log_step "INITIATING: Intelligent Priming (Library Only)..."
-
-[ -f "$STATE_FILE" ] && source "$STATE_FILE"
-
-START_TIME=$(date +%s)
-LAST_RUN_TS=${LAST_PRIMED_TS:-0}
-LMP_RUN_COUNT=0
-
-# Initialize cumulative totals if not present
-CUR_TOTAL_LMP=${TOTAL_LMP_PRIMED:-0}
-
-# --- 4.1: LOCAL MEDIA PATH ---
-log_step "Checking $LOCAL_MEDIA_PATH for new files..."
-    # Build dynamic exclusion arguments
-    FIND_EXCLUDES=""
-    for d in $EXCLUDE_DIRS; do
-        FIND_EXCLUDES="$FIND_EXCLUDES ! -path \"*/${d#/}/*\""
-    done
-    for e in $EXCLUDE_EXTS; do
-        FIND_EXCLUDES="$FIND_EXCLUDES ! -name \"*$e\""
-    done
-
-    eval "nice -n 19 ionice -c 3 find \"$LOCAL_MEDIA_PATH\" -type l $FIND_EXCLUDES -newermt \"@$LAST_RUN_TS\" -exec ls -d {} + > /dev/null 2>&1"
-
-if [[ "$ALL_HISTORICAL_PRIMED" != "TRUE" ]]; then
-    log_step "Resuming historical prime for Media Path..."
-    mapfile -t LMP_TARGETS < <(eval "nice -n 19 ionice -c 3 find \"$LOCAL_MEDIA_PATH\" -type l $FIND_EXCLUDES -not -newermt \"@${HISTORICAL_MARKER:-$(date +%s)}\" -printf \"%T@ %p\n\" | sort -rn | cut -d' ' -f2-")
-    
-    if [ ${#LMP_TARGETS[@]} -gt 0 ]; then
-        for file in "${LMP_TARGETS[@]}"; do
-            nice -n 19 ionice -c 3 ls -d "$file" > /dev/null 2>&1
-            ((LMP_RUN_COUNT++))
-            NEW_LMP_MARKER=$(stat -c %Y "$file" 2>/dev/null)
-            [ $(( $(date +%s) - START_TIME )) -ge "$PRIME_MAX_TIME" ] && break
-        done
-    else
-        ALL_HISTORICAL_PRIMED="TRUE"
-    fi
-fi
-CUR_TOTAL_LMP=$((CUR_TOTAL_LMP + LMP_RUN_COUNT))
-log_step "$LMP_RUN_COUNT new files found ... $CUR_TOTAL_LMP total files in the library."
-
 # --- SAVE STATE ---
 {
-    echo "N_FAIL_COUNT=${N_CUR_FAIL:-0}"
-    echo "LAST_PRIMED_TS=$(date +%s)"
-    echo "HISTORICAL_MARKER=${NEW_LMP_MARKER:-$HISTORICAL_MARKER}"
-    echo "ALL_HISTORICAL_PRIMED=$ALL_HISTORICAL_PRIMED"
     echo "NZB_STATE=\"$NZB_STATE\""
     echo "NZB_START_TS=\"$NZB_START_TS\""
     echo "DEC_STATE=\"$DEC_STATE\""
     echo "DEC_START_TS=\"$DEC_START_TS\""
-    echo "TOTAL_CS_PRIMED=${TOTAL_CS_PRIMED:-0}"
-    echo "TOTAL_LMP_PRIMED=$CUR_TOTAL_LMP"
 } > "$STATE_FILE"
 
-log_step "RESTORATION: Starting Consumers..."
-if [[ "$NZB_MOUNT_ALIVE" == "true" ]] && [[ "$DEC_MOUNT_ALIVE" == "true" ]]; then
-    for container in $ALL_CONSUMERS; do
-        if [ "$(docker inspect -f '{{.State.Paused}}' "$container" 2>/dev/null)" == "true" ]; then
-            docker start "$container" > /dev/null 2>&1
-        else
+# --- SECTION 4.0: RESTORATION (AUTO-HEAL) ---
+log_step "RESTORATION: Ensuring all containers are active..."
+if [[ "$NZB_MOUNT_ALIVE" == "true" ]]; then
+    for container in $CONTAINERS; do
+        if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" != "true" ]; then
+            log_step "Restoring $container..."
             docker start "$container" > /dev/null 2>&1
         fi
     done
+    
+    # Passive nudge for Decypharr
+    if [[ -n "$DECYPHAR_CONTAINER" ]]; then
+        if [[ "$DEC_MOUNT_ALIVE" == "false" ]]; then
+             log_step "NzbDAV is UP, but Decypharr is stalled. Nudging container..."
+             docker start "$DECYPHAR_CONTAINER" > /dev/null 2>&1
+        fi
+    fi
 else
-    log_step "[ABORT] Restoration skipped. One or more mounts are offline."
+    log_step "[ABORT] Restoration skipped. Primary mount is offline."
 fi
 
-# --- SECTION 6: FINAL SUMMARY ---
-log_step "FINALIZING: Generating environment report..."
+# --- SECTION 5.0: FINAL SUMMARY ---
+log_step "FINALIZING: Generating summary report..."
 [ -f "$STATE_FILE" ] && source "$STATE_FILE"
-FINAL_CUMULATIVE_TOTAL=$((${TOTAL_CS_PRIMED:-0} + ${TOTAL_LMP_PRIMED:-0}))
 
-# --- VFS & CACHE STATS ---
 VFS_HUMAN_SIZE=$(du -sh "$VFS_CACHE_DIR" | cut -f1)
 VFS_BYTE_SIZE=$(du -s "$VFS_CACHE_DIR" | cut -f1)
 
-# Convert VFS_CACHE_SIZE (e.g., 300G) to bytes using native Bash
+# Convert VFS_CACHE_SIZE to bytes
 VAL=${VFS_CACHE_SIZE%[A-Z]}
 UNIT=${VFS_CACHE_SIZE#$VAL}
 case $UNIT in
@@ -461,36 +278,31 @@ case $UNIT in
 esac
 
 VFS_PERC=$(awk "BEGIN {printf \"%.1f\", ($VFS_BYTE_SIZE/$MAX_CACHE_KB)*100}")
-
-RETENTION_DAYS="0"
-if [ -d "$VFS_CACHE_DIR/vfsMeta" ]; then
-    OLDEST_FILE_TS=$(find "$VFS_CACHE_DIR/vfsMeta" -type f -printf '%T@\n' 2>/dev/null | sort -n | head -n 1)
-    if [ -n "$OLDEST_FILE_TS" ]; then
-        NOW=$(date +%s)
-        DIFF=$((NOW - ${OLDEST_FILE_TS%.*}))
-        RETENTION_DAYS=$((DIFF / 86400))
-    fi
-fi
-
-CUR_LOAD=$(awk '{print $1}' /proc/loadavg)
 RAM_TOTAL=$(grep MemTotal /proc/meminfo | awk '{print $2}')
 RAM_FREE=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
-RAM_PERC=$(awk "BEGIN {printf \"%.1f\", ($RAM_FREE/$RAM_TOTAL)*100}")
+RAM_PERC=$(awk "BEGIN {printf \"%.1f\", (1-($RAM_FREE/$RAM_TOTAL))*100}")
 
 calculate_duration() {
-    local diff=$(($(date +%s) - $1))
+    local ts=${1:-$(date +%s)}
+    local diff=$(($(date +%s) - $ts))
     local days=$((diff / 86400))
     local hours=$(( (diff % 86400) / 3600 ))
     local mins=$(( (diff % 3600) / 60 ))
     [ $days -gt 0 ] && echo "${days}d ${hours}h ${mins}m" || ([ $hours -gt 0 ] && echo "${hours}h ${mins}m" || echo "${mins}m")
 }
 
-NZB_TIME=$(calculate_duration ${NZB_START_TS:-$(date +%s)})
-DEC_TIME=$(calculate_duration ${DEC_START_TS:-$(date +%s)})
+NZB_TIME=$(calculate_duration $NZB_START_TS)
 
-echo ""
-echo "Status Summary:"
-echo "NzbDAV ${NZB_STATE} (${NZB_TIME}) : Decypharr ${DEC_STATE} (${DEC_TIME}) | Primed ${FINAL_CUMULATIVE_TOTAL:-0} | VFS Cache ${VFS_HUMAN_SIZE} (${VFS_PERC}%) | Retention ${RETENTION_DAYS} days | Load ${CUR_LOAD} | RAM FREE: ${RAM_PERC}%"
-echo "--------------------------------------------------------------------------------------"
+if [[ -n "$DECYPHAR_CONTAINER" ]]; then
+    DEC_TIME=$(calculate_duration $DEC_START_TS)
+    DEC_DISPLAY="${DEC_STATE} (${DEC_TIME})"
+else
+    DEC_DISPLAY="DISABLED"
+fi
+
+log_step ""
+log_step "Status Summary:"
+log_step "NzbDAV ${NZB_STATE} (${NZB_TIME}) : Decypharr ${DEC_DISPLAY} | VFS Cache ${VFS_HUMAN_SIZE} (${VFS_PERC}%) | RAM Use: ${RAM_PERC}%"
+log_step "--------------------------------------------------------------------------------------"
 log_step "STATUS: All Systems Operational."
 exit 0
