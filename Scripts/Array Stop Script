@@ -1,7 +1,7 @@
 #!/bin/bash
 # ======================================================================================
 # SCRIPT: The Janitor (Array Shutdown Orchestrator)
-# VERSION: v1.1
+# VERSION: v1.2
 # DESCRIPTION: Ensures a clean Unraid shutdown by flushing databases, unmounting 
 #              complex bind-mounts, terminating Rclone, and exporting ZFS pools.
 # ======================================================================================
@@ -9,10 +9,6 @@
 # --------------------------------------------------------------------------------------
 # 1. USER CONFIGURATION
 # --------------------------------------------------------------------------------------
-
-# --- DATABASE SETTINGS ---
-PG_CONTAINER="postgresql16" 
-PG_FLUSH_TIME="60"
 
 # --- MOUNT & BRIDGE SETTINGS ---
 RC_PORT="5572"
@@ -33,8 +29,10 @@ BINDS=(
 ZFS_POOLS=("cache" "computers")
 
 # --- SCRIPT SETTINGS ---
-LOG_FILE="/mnt/cache/appdata/other/scripts/nzbdav/shutdown.log"
-LOCK_DIR="/mnt/cache/appdata/other/scripts/nzbdav"
+LOG_FILE="/mnt/cache/appdata/other/scripts/shutdown/shutdown.log"
+# The parent directory for all script-related locks
+BASE_SCRIPT_DIR="/mnt/user/appdata/other/scripts"
+STATE_FILE="$BASE_SCRIPT_DIR/rclone/prime_state.db"
 
 # --------------------------------------------------------------------------------------
 # 2. MAIN SCRIPT
@@ -47,7 +45,7 @@ log_step() {
     echo "[$(date '+%H:%M:%S')] INFO: $MSG" | tee -a "$LOG_FILE"
 }
 
-echo "--- COMMENCING CLEAN ARRAY SHUTDOWN (v1.1) ---" | tee -a "$LOG_FILE"
+log_step "--- COMMENCING CLEAN ARRAY SHUTDOWN (v1.1) ---" | tee -a "$LOG_FILE"
 
 # --- Stage 1. PRE-SHUTDOWN RAM SYNC ---
 log_step "FORCING RAM FLUSH: Writing active buffers to disk..."
@@ -55,12 +53,6 @@ sync
 log_step "SUCCESS: RAM buffers committed to storage."
 
 # --- STAGE 2: STOP DOCKERS ---
-if [ -n "$PG_CONTAINER" ]; then
-    log_step "Signaling $PG_CONTAINER to flush and stop ($PG_FLUSH_TIME seconds)..."
-    docker stop -t "$PG_FLUSH_TIME" "$PG_CONTAINER" > /dev/null 2>&1
-    log_step "SUCCESS: Database flush and stop complete."
-fi
-
 log_step "Stopping all remaining containers..."
 docker stop $(docker ps -q) > /dev/null 2>&1
 log_step "SUCCESS: All remaining Docker containers stopped."
@@ -104,16 +96,18 @@ if [ ${#ZFS_POOLS[@]} -gt 0 ]; then
 fi
 
 # --- STAGE 7: CLEANUP & NOTIFY ---
-log_step "Purging script lock files..."
-rm -f "$LOCK_DIR"/janitor_*.lock
-rm -f "$LOCK_DIR"/heartbeat_*.lock "$LOCK_DIR"/prime_state.db
-log_step "SUCCESS: Lock files purged. Environment clear for shutdown."
+log_step "Deep purging all script lock files and Rclone state..."
+
+# Recursively finds and removes any .lock files and the prime_state.db
+find "$BASE_SCRIPT_DIR" -type f \( -name "*.lock" -o -name "prime_state.db" \) -delete
+
+log_step "SUCCESS: All nested lock files and Rclone state purged."
 
 /usr/local/emhttp/webGui/scripts/notify \
     -e "Server Status" \
     -s "Shutdown Prepared" \
-    -d "v1.1 Binds, Bridges, and ZFS Pools cleared cleanly." \
+    -d "v1.2 Global Script Cleanup Complete." \
     -i "normal"
 
-echo "--- JANITOR WORK COMPLETE ---" | tee -a "$LOG_FILE"
+log_step "--- JANITOR WORK COMPLETE ---" | tee -a "$LOG_FILE"
 exit 0
