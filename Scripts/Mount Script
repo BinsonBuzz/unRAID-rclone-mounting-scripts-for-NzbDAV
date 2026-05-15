@@ -1,9 +1,9 @@
 #!/bin/bash
 # ======================================================================================
 # SCRIPT: Rclone Heartbeat & Intelligent Priming
-# VERSION: v1.0-RC2.0.6
+# VERSION: v1.0-RC2.0.7
 # DESCRIPTION: Monitors Rclone mounts and performs "Smart Priming".
-#               v2.0.6: Clears N mountpath if not empty
+#               v2.0.7: Stabilty updates
 # ======================================================================================
 
 # --------------------------------------------------------------------------------------
@@ -11,12 +11,12 @@
 # --------------------------------------------------------------------------------------
 
 # --- SCRIPT SETTINGS ---
-SCRIPT_VERSION="v1.0-RC2.0.6"
+SCRIPT_VERSION="v1.0-RC2.0.7"
 STATE_FILE="/mnt/user/appdata/other/scripts/rclone/prime_state.db"
 LOG_FILE="/mnt/user/appdata/other/scripts/rclone/rclone_mount.log"
 
 # --- REQUIRED SETTINGS ---
-REMOTE_NAME="nzb-dav:"                                                                           # Rclone remote name including colon
+REMOTE_NAME="nzbdav:"                                                                           # Rclone remote name including colon
 RCLONE_CONF="/boot/config/plugins/rclone/.rclone.conf"
 MOUNT_PATH="/mnt/computers/streaming/nzbdav"                                                     # full path to where remote should be mounted
 VFS_CACHE_DIR="/mnt/computers/streaming/cache/nzbdav"                                            # Path for rclone cache files
@@ -35,17 +35,17 @@ ATTR_TIME="2000h"                                                               
 DECYPH_PATH="/mnt/computers/streaming/decypharr"                                                 # Location of your Decypharr mount
 RC_IP="0.0.0.0"                                                                                  #
 RC_PORT="5572"                                                                                   #
-RC_USER="username"   
-RC_PASS="password"
+RC_USER="your_user"   
+RC_PASS="your_pass"
 CPU_PIN="12,13,14,15,28,29,30,31"                                                      
 
 # --- DOCKER SETTINGS ---
-NZBDAV_CONTAINER="NzbDAV"
+NZBDAV_CONTAINER="nzbdav"
 DECYPHAR_CONTAINER="Decypharr"
-CONTAINERS="byparr prowlarr postgresql16 sonarr radarr lidarr Sportarr bookshelf bazarr plex emby tautulli Seerr Wizarr"
+CONTAINERS="byparr prowlarr postgresql16 plex emby tautulli Seerr Wizarr radarr sonarr lidarr Sportarr bookshelf bazaarr"
 
 # --------------------------------------------------------------------------------------
-# 2. MAIN SCRIPT
+# 2. MAIN SCRIPT - DO NOT EDIT BELOW HERE!
 # --------------------------------------------------------------------------------------
 
 log_step() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; } 
