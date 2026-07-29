@@ -1,0 +1,262 @@
+#!/bin/bash
+# ==============================================================================
+# SCRIPT: Arr Containers Watchdog & Heartbeat Monitor
+# VERSION: v1.2.0
+# DESCRIPTION: Monitors Arr application APIs and restarts containers if frozen.
+#              Includes pre-flight mount validation using file checks, and
+#              optional per-Arr container shutdown if mounts are offline.
+# ==============================================================================
+
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
+TIMEOUT_SECONDS=10
+BASE_DATA_DIR="/mnt/cache/appdata/other/scripts/arr_heartbeat"
+
+# ------------------------------------------------------------------------------
+# MOUNT SAFETY GUARD SETTINGS
+# ------------------------------------------------------------------------------
+# Define specific validation files that must exist and be readable.
+# Matches the approach used in the Rclone Heartbeat script.
+REQUIRED_MOUNT_FILES=(
+    "/mnt/computers/streaming/nzbdav/README"
+    "/mnt/computers/streaming/decypharr/version.txt"
+)
+
+# ------------------------------------------------------------------------------
+# ARR APPLICATIONS CONFIGURATION
+# ------------------------------------------------------------------------------
+# Configuration Array Structure:
+# ARR_ENABLED[x]="true|false"
+# ARR_STOP_ON_MOUNT_FAIL[x]="true|false"
+# ARR_CONTAINER[x]="Docker Container Name"
+# ARR_URL[x]="Base URL"
+# ARR_API_KEY[x]="API Key"
+
+# --- ARR 1: Radarr ---
+ARR_ENABLED[1]="true"
+ARR_STOP_ON_MOUNT_FAIL[1]="true"
+ARR_CONTAINER[1]="radarr"
+ARR_URL[1]="http://192.168.1.1:7878/radarr"
+ARR_API_KEY[1]="YOUR_API_KEY_HERE"
+
+# --- ARR 2: Sonarr ---
+ARR_ENABLED[2]="true"
+ARR_STOP_ON_MOUNT_FAIL[2]="true"
+ARR_CONTAINER[2]="sonarr"
+ARR_URL[2]="http://192.168.1.1:8989/sonarr"
+ARR_API_KEY[2]="YOUR_API_KEY_HERE"
+
+# --- ARR 3: Extra Arr #1 (e.g., Lidarr) ---
+ARR_ENABLED[3]="false"
+ARR_STOP_ON_MOUNT_FAIL[3]="false"
+ARR_CONTAINER[3]="lidarr"
+ARR_URL[3]="http://192.168.1.1:8686/lidarr"
+ARR_API_KEY[3]="YOUR_API_KEY_HERE"
+
+# --- ARR 4: Extra Arr #2 (e.g., Readarr) ---
+ARR_ENABLED[4]="false"
+ARR_STOP_ON_MOUNT_FAIL[4]="false"
+ARR_CONTAINER[4]="readarr"
+ARR_URL[4]="http://192.168.1.1:8787/readarr"
+ARR_API_KEY[4]="YOUR_API_KEY_HERE"
+
+# --- ARR 5: Extra Arr #3 (e.g., Prowlarr) ---
+ARR_ENABLED[5]="false"
+ARR_STOP_ON_MOUNT_FAIL[5]="false"
+ARR_CONTAINER[5]="prowlarr"
+ARR_URL[5]="http://192.168.1.1:9696/prowlarr"
+ARR_API_KEY[5]="YOUR_API_KEY_HERE"
+
+
+# ==============================================================================
+# HELPER FUNCTIONS
+# ==============================================================================
+format_duration() {
+    local seconds=$1
+    if (( seconds < 60 )); then
+        echo "${seconds}s"
+    elif (( seconds < 3600 )); then
+        echo "$((seconds / 60))m $((seconds % 60))s"
+    else
+        echo "$((seconds / 3600))h $(( (seconds % 3600) / 60 ))m"
+    fi
+}
+
+verify_mounts() {
+    if [ ${#REQUIRED_MOUNT_FILES[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    echo "Verifying required mount target files..."
+    for validation_file in "${REQUIRED_MOUNT_FILES[@]}"; do
+        if ! timeout 5s ls "$validation_file" > /dev/null 2>&1; then
+            echo "[ABORT] Mount check failed or timed out for file: '$validation_file'"
+            return 1
+        fi
+    done
+
+    echo "All mount validation checks passed successfully."
+    echo ""
+    return 0
+}
+
+handle_mount_failure() {
+    echo "Processing configured safety stops due to mount failure..."
+    echo ""
+
+    for i in "${!ARR_ENABLED[@]}"; do
+        local enabled="${ARR_ENABLED[$i]}"
+        local stop_on_fail="${ARR_STOP_ON_MOUNT_FAIL[$i]}"
+        local container_name="${ARR_CONTAINER[$i]}"
+
+        if [ "$enabled" == "true" ] && [ "$stop_on_fail" == "true" ]; then
+            if [ "$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null)" == "true" ]; then
+                echo "Stopping container '$container_name' (ARR_STOP_ON_MOUNT_FAIL is enabled)..."
+                docker stop "$container_name" > /dev/null 2>&1
+                if [ $? -eq 0 ]; then
+                    echo "Success: Container '$container_name' stopped safely."
+                else
+                    echo "Error: Failed to stop container '$container_name'."
+                fi
+            else
+                echo "Container '$container_name' is already stopped."
+            fi
+        fi
+    done
+}
+
+show_uptime_summary() {
+    local container_name="$1"
+    local restart_log="$2"
+
+    echo "--------------------------------------------------"
+    echo "            ${container_name^^} UPTIME SUMMARY              "
+    echo "--------------------------------------------------"
+    
+    # 1. Current Uptime from Docker Inspect
+    local inspect_start
+    inspect_start=$(docker inspect -f '{{.State.StartedAt}}' "$container_name" 2>/dev/null)
+    
+    if [ -n "$inspect_start" ]; then
+        local start_epoch
+        start_epoch=$(date -d "$inspect_start" +%s 2>/dev/null)
+        if [ -n "$start_epoch" ]; then
+            local now_epoch
+            now_epoch=$(date +%s)
+            local current_uptime=$((now_epoch - start_epoch))
+            echo "Current Run Status: Running"
+            echo "Time Since Last Restart: $(format_duration $current_uptime)"
+        else
+            echo "Current Run Status: Active (Unable to parse precise start time)"
+        fi
+    else
+        echo "Current Run Status: Container not running or not found."
+    fi
+    
+    echo ""
+    echo "Previous Run Durations (Older to Newer):"
+    echo "----------------------------------------"
+    
+    # 2. Historical Run Durations
+    if [ ! -f "$restart_log" ] || [ ! -s "$restart_log" ]; then
+        echo " No historical crash data recorded yet."
+    else
+        local prev_time=""
+        local temp_history=()
+
+        while read -r timestamp; do
+            if [ -n "$prev_time" ]; then
+                local duration=$((timestamp - prev_time))
+                temp_history+=("$(format_duration $duration)")
+            fi
+            prev_time=$timestamp
+        done < "$restart_log"
+
+        local total_durations=${#temp_history[@]}
+        if [ "$total_durations" -eq 0 ]; then
+            echo " Gathering baseline timestamps... (Need another restart to calculate historical duration)"
+        else
+            local start_idx=$(( total_durations - 3 ))
+            (( start_idx < 0 )) && start_idx=0
+            
+            for (( i=start_idx; i<total_durations; i++ )); do
+                echo " • Run $((i + 1)): Up for ${temp_history[i]}"
+            done
+        fi
+    fi
+    echo "--------------------------------------------------"
+}
+
+check_arr() {
+    local enabled="$1"
+    local container_name="$2"
+    local url="$3"
+    local api_key="$4"
+
+    if [ "$enabled" != "true" ]; then
+        echo "Skipping $container_name (heartbeat check is disabled)."
+        echo ""
+        return 0
+    fi
+
+    # Strip trailing slash from URL if present for API consistency
+    url="${url%/}"
+
+    local data_dir="$BASE_DATA_DIR/$container_name"
+    local restart_log="$data_dir/restart_history.txt"
+    mkdir -p "$data_dir"
+
+    echo "Checking $container_name health status..."
+
+    local http_status
+    http_status=$(curl -s -o /dev/null -w "%{http_code}" \
+      --max-time "$TIMEOUT_SECONDS" \
+      -H "X-Api-Key: $api_key" \
+      "$url/api/v3/system/status")
+
+    if [ "$http_status" -eq 200 ]; then
+        echo "Success: $container_name is responding normally (HTTP 200)."
+        show_uptime_summary "$container_name" "$restart_log"
+    else
+        echo "Warning: $container_name failed to respond. HTTP Status code: $http_status"
+        echo "Logging crash event and restarting container '$container_name'..."
+        
+        date +%s >> "$restart_log"
+        tail -n 10 "$restart_log" > "${restart_log}.tmp" && mv "${restart_log}.tmp" "$restart_log"
+        
+        docker restart "$container_name"
+        
+        if [ $? -eq 0 ]; then
+            echo "Success: Container '$container_name' restarted successfully."
+        else
+            echo "Error: Failed to restart container '$container_name'."
+        fi
+        
+        echo ""
+        show_uptime_summary "$container_name" "$restart_log"
+    fi
+    echo ""
+}
+
+# ==============================================================================
+# MAIN WATCHDOG LOOP
+# ==============================================================================
+
+# Pre-flight Mount Validation
+if ! verify_mounts; then
+    handle_mount_failure
+    echo "Aborting Watchdog execution due to mount failure."
+    exit 1
+fi
+
+# Process enabled Arr instances
+for i in "${!ARR_ENABLED[@]}"; do
+    check_arr \
+        "${ARR_ENABLED[$i]}" \
+        "${ARR_CONTAINER[$i]}" \
+        "${ARR_URL[$i]}" \
+        "${ARR_API_KEY[$i]}"
+done
+
+exit 0
