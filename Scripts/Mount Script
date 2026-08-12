@@ -1,9 +1,9 @@
 #!/bin/bash
 # ======================================================================================
-# SCRIPT: Rclone Heartbeat & Intelligent Priming
-# VERSION: v1.0-RC2.0.9
+# SCRIPT: Rclone Heartbeat
+# VERSION: v1.0-RC2.0.11
 # DESCRIPTION: Monitors Rclone mounts
-#               v2.0.9: Optimised mount command based on new nzbdav guidance
+#               v2.0.11: Deletes oldest cache files to stop size getting out of control
 # ======================================================================================
 
 # --------------------------------------------------------------------------------------
@@ -11,7 +11,7 @@
 # --------------------------------------------------------------------------------------
 
 # --- SCRIPT SETTINGS ---
-SCRIPT_VERSION="v1.0-RC2.0.9"
+SCRIPT_VERSION="v1.0-RC2.0.11"
 STATE_FILE="/mnt/user/appdata/other/scripts/rclone/prime_state.db"
 LOG_FILE="/mnt/user/appdata/other/scripts/rclone/rclone_mount.log"
 
@@ -22,8 +22,9 @@ MOUNT_PATH="/mnt/computers/streaming/nzbdav"                                    
 VFS_CACHE_DIR="/mnt/computers/streaming/cache/nzbdav"                                            # Path for rclone cache files
 VFS_CACHE_SIZE="100G"                                                                            # Maximum size of the VFS cache
 VFS_CACHE_AGE="2d"
-VFS_READ_AHEAD="512M"
-VFS_CHUNK_LIMIT="512M"
+VFS_READ_AHEAD="1024M"
+VFS_CHUNK_LIMIT="1024M"
+
 VFS_MODE="full"                                                                                  # --vfs-cache-mode mode.
 CHUNK_START="16M"                                                                                 # --vfs-read-chunk-size.
 RAM_BUFFER="0M"                                                                                 # --buffer-size RAM buffer.
@@ -35,12 +36,12 @@ RC_IP="0.0.0.0"                                                                 
 RC_PORT="5573"                                                                                   #
 RC_USER="YOUR_USERNAME"   
 RC_PASS="YOUR_PASSWORD"
-CPU_PIN="12,13,14,15,28,29,30,31"                                                                # Pin rclone to chosen CPU cores                                            
+CPU_PIN="12,13,14,15,28,29,30,31"                                                      
 
 # --- DOCKER SETTINGS ---
 NZBDAV_CONTAINER="nzbdav"
 DECYPHAR_CONTAINER="Decypharr"
-CONTAINERS="byparr prowlarr postgresql16 plex emby tautulli Seerr Wizarr radarr sonarr lidarr bookshelf bazarr posterizarr Kometa calibre2026 calibre-web"
+CONTAINERS="autopulse byparr prowlarr postgresql16 plex emby tautulli Seerr Wizarr radarr sonarr lidarr bookshelf bazarr posterizarr Kometa neutarr calibre2026 calibre-web"
 
 # --------------------------------------------------------------------------------------
 # 2. MAIN SCRIPT - DO NOT EDIT BELOW HERE!
@@ -67,8 +68,7 @@ log_step "[RCLONE PERFORMANCE]"
 log_step "VFS Mode:            $VFS_MODE"
 log_step "VFS Read Ahead:      $VFS_READ_AHEAD"
 log_step "RAM Buffer:          $RAM_BUFFER"
-log_step "CHUNK Start:         $CHUNK_START"
-log_step "CHUNK Limit:         $VFS_CHUNK_LIMITSTART"
+log_step "CHUNK START:         $CHUNK_START"
 log_step ""
 log_step "[DOCKER SETTINGS]"
 log_step "NzbDAV Container:    $NZBDAV_CONTAINER"
@@ -134,22 +134,36 @@ else
     fi
 fi
 
-# --- SECTION 2.5: DECYPHARR MOUNT AUDIT (ELEGANT PAUSE) ---
+# --- SECTION 2.5: DECYPHARR MOUNT & UI AUDIT ---
 DEC_MOUNT_ALIVE=false
+DECYPHARR_PORT="8282"
+
 if [[ -n "$DECYPH_PATH" ]] && [[ -n "$DECYPHAR_CONTAINER" ]]; then
-    log_step "CHECKING: Decypharr Mount integrity..."
+    log_step "CHECKING: Decypharr Mount & UI responsiveness..."
     
     D_COUNT=0
     while [ $D_COUNT -lt 5 ]; do
-        # PASSIVE CHECK: Only look for the file. No forced restarts/docker starts here.
+        # Check 1: Container state & Mount accessibility
+        MOUNT_OK=false
         if [ "$(docker inspect -f '{{.State.Running}}' "$DECYPHAR_CONTAINER" 2>/dev/null)" == "true" ] && \
            timeout 5s ls "$DECYPH_PATH/version.txt" > /dev/null 2>&1; then
+            MOUNT_OK=true
+        fi
+
+        # Check 2: UI Responsiveness via host HTTP status
+        UI_HTTP_CODE=$(curl -s -L -o /dev/null -w "%{http_code}" --max-time 5 "http://localhost:${DECYPHARR_PORT}/")
+        UI_OK=false
+        if [[ "$UI_HTTP_CODE" -eq 200 || "$UI_HTTP_CODE" -eq 303 ]]; then
+            UI_OK=true
+        fi
+
+        if [[ "$MOUNT_OK" == "true" ]] && [[ "$UI_OK" == "true" ]]; then
             DEC_MOUNT_ALIVE=true
-            log_step "Passed: Decypharr is UP."
+            log_step "Passed: Decypharr Mount and UI are UP."
             break
         fi
         
-        log_step "WAITING: Decypharr mount not ready/responsive (Attempt $((D_COUNT + 1))/5)..."
+        log_step "WAITING: Decypharr mount/UI not ready (Attempt $((D_COUNT + 1))/5 | HTTP: $UI_HTTP_CODE)..."
         sleep 6
         ((D_COUNT++))
     done
@@ -160,7 +174,8 @@ if [[ -n "$DECYPH_PATH" ]] && [[ -n "$DECYPHAR_CONTAINER" ]]; then
             DEC_START_TS=$(date +%s)
         fi
     else
-        log_step "[!] Decypharr is DOWN."
+        log_step "[!] Decypharr failed checks (Mount or UI unresponsive). Restarting container..."
+        docker restart "$DECYPHAR_CONTAINER" > /dev/null 2>&1
         if [[ "$DEC_STATE" != "DOWN" ]]; then
             DEC_STATE="DOWN"
             DEC_START_TS=$(date +%s)
@@ -256,6 +271,45 @@ if [[ "$NZB_MOUNT_ALIVE" == "true" ]]; then
     fi
 else
     log_step "[ABORT] Restoration skipped. Primary mount is offline."
+fi
+
+# --- SECTION 4.5: VFS CACHE SMART PRUNE ---
+if [[ -d "$VFS_CACHE_DIR/vfs" ]]; then
+    # Calculate 2x VFS_CACHE_SIZE limit dynamically in Kilobytes
+    VAL=${VFS_CACHE_SIZE%[A-Z]}
+    UNIT=${VFS_CACHE_SIZE#$VAL}
+    case $UNIT in
+        G) BASE_KB=$((VAL * 1024 * 1024)) ;;
+        M) BASE_KB=$((VAL * 1024)) ;;
+        *) BASE_KB=$VAL ;;
+    esac
+    TARGET_PRUNE_LIMIT_KB=$((BASE_KB * 2))
+
+    CURRENT_VFS_KB=$(du -s "$VFS_CACHE_DIR/vfs" 2>/dev/null | cut -f1)
+    CURRENT_VFS_KB=${CURRENT_VFS_KB:-0}
+
+    if [ "$CURRENT_VFS_KB" -gt "$TARGET_PRUNE_LIMIT_KB" ]; then
+        log_step "WARN: VFS cache ($((CURRENT_VFS_KB / 1024 / 1024))GB) exceeds 2x limit ($((TARGET_PRUNE_LIMIT_KB / 1024 / 1024))GB). Initiating smart prune..."
+        
+        # Stream files sorted by access time (oldest first) and delete until below target size
+        find "$VFS_CACHE_DIR/vfs" -type f -printf "%A@ %p\n" 2>/dev/null | sort -n 2>/dev/null | cut -d' ' -f2- 2>/dev/null | while read -r filepath; do
+            if [ -f "$filepath" ]; then
+                FILE_SIZE_KB=$(du -k "$filepath" 2>/dev/null | cut -f1)
+                FILE_SIZE_KB=${FILE_SIZE_KB:-0}
+                
+                rm -f "$filepath" 2>/dev/null
+                CURRENT_VFS_KB=$((CURRENT_VFS_KB - FILE_SIZE_KB))
+                
+                if [ "$CURRENT_VFS_KB" -le "$TARGET_PRUNE_LIMIT_KB" ]; then
+                    log_step "SUCCESS: VFS cache pruned back under 2x limit."
+                    break
+                fi
+            fi
+        done
+        
+        # Clean up any leftover empty directories inside vfs
+        find "$VFS_CACHE_DIR/vfs" -type d -empty -delete 2>/dev/null
+    fi
 fi
 
 # --- SECTION 5.0: FINAL SUMMARY ---
