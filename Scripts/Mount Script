@@ -1,9 +1,9 @@
 #!/bin/bash
 # ======================================================================================
 # SCRIPT: Rclone Heartbeat
-# VERSION: v1.0-RC2.0.11
+# VERSION: v1.0-RC2.0.12
 # DESCRIPTION: Monitors Rclone mounts
-#               v2.0.11: Deletes oldest cache files to stop size getting out of control
+#               v2.0.12: VFS Cache pruning controlled by target utilisation
 # ======================================================================================
 
 # --------------------------------------------------------------------------------------
@@ -11,7 +11,7 @@
 # --------------------------------------------------------------------------------------
 
 # --- SCRIPT SETTINGS ---
-SCRIPT_VERSION="v1.0-RC2.0.11"
+SCRIPT_VERSION="v1.0-RC2.0.12"
 STATE_FILE="/mnt/user/appdata/other/scripts/rclone/prime_state.db"
 LOG_FILE="/mnt/user/appdata/other/scripts/rclone/rclone_mount.log"
 
@@ -19,8 +19,10 @@ LOG_FILE="/mnt/user/appdata/other/scripts/rclone/rclone_mount.log"
 REMOTE_NAME="nzbdav:"                                                                           # Rclone remote name including colon
 RCLONE_CONF="/boot/config/plugins/rclone/.rclone.conf"
 MOUNT_PATH="/mnt/computers/streaming/nzbdav"                                                     # full path to where remote should be mounted
-VFS_CACHE_DIR="/mnt/computers/streaming/cache/nzbdav"                                            # Path for rclone cache files
-VFS_CACHE_SIZE="100G"                                                                            # Maximum size of the VFS cache
+VFS_CACHE_DIR="/mnt/samsung/streaming_cache/nzbdav"                                            # Path for rclone cache files
+VFS_CACHE_SIZE="150G"                                                                            # Maximum size of the VFS cache
+CACHE_DRIVE_SIZE="250G"
+CACHE_DRIVE_MAX_UTILISATION="85%"                                                               # Target max drive utilisation % oldest files deleted until utilisation under this number
 VFS_CACHE_AGE="2d"
 VFS_READ_AHEAD="1024M"
 VFS_CHUNK_LIMIT="1024M"
@@ -275,33 +277,27 @@ fi
 
 # --- SECTION 4.5: VFS CACHE SMART PRUNE ---
 if [[ -d "$VFS_CACHE_DIR/vfs" ]]; then
-    # Calculate 2x VFS_CACHE_SIZE limit dynamically in Kilobytes
-    VAL=${VFS_CACHE_SIZE%[A-Z]}
-    UNIT=${VFS_CACHE_SIZE#$VAL}
-    case $UNIT in
-        G) BASE_KB=$((VAL * 1024 * 1024)) ;;
-        M) BASE_KB=$((VAL * 1024)) ;;
-        *) BASE_KB=$VAL ;;
-    esac
-    TARGET_PRUNE_LIMIT_KB=$((BASE_KB * 2))
+    # Extract numerical target percentage (e.g., 85% -> 85)
+    TARGET_UTIL_PCT="${CACHE_DRIVE_MAX_UTILISATION%%%}"
+    
+    # Get current drive utilisation percentage for the cache directory
+    CURRENT_UTIL_PCT=$(df -P "$VFS_CACHE_DIR" | awk 'NR==2 {print $5}' | tr -d '%')
+    CURRENT_UTIL_PCT=${CURRENT_UTIL_PCT:-0}
 
-    CURRENT_VFS_KB=$(du -s "$VFS_CACHE_DIR/vfs" 2>/dev/null | cut -f1)
-    CURRENT_VFS_KB=${CURRENT_VFS_KB:-0}
-
-    if [ "$CURRENT_VFS_KB" -gt "$TARGET_PRUNE_LIMIT_KB" ]; then
-        log_step "WARN: VFS cache ($((CURRENT_VFS_KB / 1024 / 1024))GB) exceeds 2x limit ($((TARGET_PRUNE_LIMIT_KB / 1024 / 1024))GB). Initiating smart prune..."
+    if [ "$CURRENT_UTIL_PCT" -ge "$TARGET_UTIL_PCT" ]; then
+        log_step "WARN: Cache drive utilisation (${CURRENT_UTIL_PCT}%) reached or exceeded target limit (${TARGET_UTIL_PCT}%). Initiating smart prune..."
         
-        # Stream files sorted by access time (oldest first) and delete until below target size
+        # Stream files sorted by access time (oldest first) and delete until utilisation is below target
         find "$VFS_CACHE_DIR/vfs" -type f -printf "%A@ %p\n" 2>/dev/null | sort -n 2>/dev/null | cut -d' ' -f2- 2>/dev/null | while read -r filepath; do
             if [ -f "$filepath" ]; then
-                FILE_SIZE_KB=$(du -k "$filepath" 2>/dev/null | cut -f1)
-                FILE_SIZE_KB=${FILE_SIZE_KB:-0}
-                
                 rm -f "$filepath" 2>/dev/null
-                CURRENT_VFS_KB=$((CURRENT_VFS_KB - FILE_SIZE_KB))
                 
-                if [ "$CURRENT_VFS_KB" -le "$TARGET_PRUNE_LIMIT_KB" ]; then
-                    log_step "SUCCESS: VFS cache pruned back under 2x limit."
+                # Check current drive utilisation after deletion
+                CHECK_UTIL_PCT=$(df -P "$VFS_CACHE_DIR" | awk 'NR==2 {print $5}' | tr -d '%')
+                CHECK_UTIL_PCT=${CHECK_UTIL_PCT:-0}
+                
+                if [ "$CHECK_UTIL_PCT" -lt "$TARGET_UTIL_PCT" ]; then
+                    log_step "SUCCESS: Cache drive utilisation pruned down to ${CHECK_UTIL_PCT}% (below ${TARGET_UTIL_PCT}% limit)."
                     break
                 fi
             fi
