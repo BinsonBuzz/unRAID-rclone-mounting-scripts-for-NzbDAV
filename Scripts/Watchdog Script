@@ -1,72 +1,87 @@
 #!/bin/bash
 # ==============================================================================
-# SCRIPT: Arr Containers Watchdog & Heartbeat Monitor
-# VERSION: v1.2.0
-# DESCRIPTION: Monitors Arr application APIs and restarts containers if frozen.
+# SCRIPT: Arr & Media Containers Watchdog & Heartbeat Monitor
+# VERSION: v1.4.0
+# DESCRIPTION: Monitors Arr and Plex application APIs and restarts containers if frozen.
 #              Includes pre-flight mount validation using file checks, and
-#              optional per-Arr container shutdown if mounts are offline.
+#              per-container safety shutdown if mounts are offline.
 # ==============================================================================
 
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
-TIMEOUT_SECONDS=10
+TIMEOUT_SECONDS=15
+MAX_RETRIES=3
+RETRY_DELAY=5
 BASE_DATA_DIR="/mnt/cache/appdata/other/scripts/arr_heartbeat"
 
 # ------------------------------------------------------------------------------
 # MOUNT SAFETY GUARD SETTINGS
 # ------------------------------------------------------------------------------
 # Define specific validation files that must exist and be readable.
-# Matches the approach used in the Rclone Heartbeat script.
 REQUIRED_MOUNT_FILES=(
     "/mnt/computers/streaming/nzbdav/README"
     "/mnt/computers/streaming/decypharr/version.txt"
 )
 
 # ------------------------------------------------------------------------------
-# ARR APPLICATIONS CONFIGURATION
+# APPLICATIONS CONFIGURATION
 # ------------------------------------------------------------------------------
 # Configuration Array Structure:
 # ARR_ENABLED[x]="true|false"
 # ARR_STOP_ON_MOUNT_FAIL[x]="true|false"
 # ARR_CONTAINER[x]="Docker Container Name"
 # ARR_URL[x]="Base URL"
-# ARR_API_KEY[x]="API Key"
+# ARR_API_KEY[x]="API Key or Plex Token"
+# ARR_TYPE[x]="arr|plex"
 
-# --- ARR 1: Radarr ---
+# --- APPLICATION 1: Radarr ---
 ARR_ENABLED[1]="true"
 ARR_STOP_ON_MOUNT_FAIL[1]="true"
 ARR_CONTAINER[1]="radarr"
 ARR_URL[1]="http://192.168.1.1:7878/radarr"
 ARR_API_KEY[1]="YOUR_API_KEY_HERE"
+ARR_TYPE[1]="arr"
 
-# --- ARR 2: Sonarr ---
+# --- APPLICATION 2: Sonarr ---
 ARR_ENABLED[2]="true"
 ARR_STOP_ON_MOUNT_FAIL[2]="true"
 ARR_CONTAINER[2]="sonarr"
 ARR_URL[2]="http://192.168.1.1:8989/sonarr"
 ARR_API_KEY[2]="YOUR_API_KEY_HERE"
+ARR_TYPE[2]="arr"
 
-# --- ARR 3: Extra Arr #1 (e.g., Lidarr) ---
-ARR_ENABLED[3]="false"
-ARR_STOP_ON_MOUNT_FAIL[3]="false"
-ARR_CONTAINER[3]="lidarr"
-ARR_URL[3]="http://192.168.1.1:8686/lidarr"
+# --- APPLICATION 3: Plex Media Server ---
+ARR_ENABLED[3]="true"
+ARR_STOP_ON_MOUNT_FAIL[3]="true"
+ARR_CONTAINER[3]="plex"
+ARR_URL[3]="http://192.168.1.1:32400"
 ARR_API_KEY[3]="YOUR_API_KEY_HERE"
+ARR_TYPE[3]="plex"
 
-# --- ARR 4: Extra Arr #2 (e.g., Readarr) ---
+# --- APPLICATION 4: Extra Arr #1 (e.g., Lidarr) ---
 ARR_ENABLED[4]="false"
 ARR_STOP_ON_MOUNT_FAIL[4]="false"
-ARR_CONTAINER[4]="readarr"
-ARR_URL[4]="http://192.168.1.1:8787/readarr"
+ARR_CONTAINER[4]="lidarr"
+ARR_URL[4]="http://192.168.1.1:8686/lidarr"
 ARR_API_KEY[4]="YOUR_API_KEY_HERE"
+ARR_TYPE[4]="arr"
 
-# --- ARR 5: Extra Arr #3 (e.g., Prowlarr) ---
+# --- APPLICATION 5: Extra Arr #2 (e.g., Readarr) ---
 ARR_ENABLED[5]="false"
 ARR_STOP_ON_MOUNT_FAIL[5]="false"
-ARR_CONTAINER[5]="prowlarr"
-ARR_URL[5]="http://192.168.1.1:9696/prowlarr"
+ARR_CONTAINER[5]="readarr"
+ARR_URL[5]="http://192.168.1.1:8787/readarr"
 ARR_API_KEY[5]="YOUR_API_KEY_HERE"
+ARR_TYPE[5]="arr"
+
+# --- APPLICATION 6: Extra Arr #3 (e.g., Prowlarr) ---
+ARR_ENABLED[6]="false"
+ARR_STOP_ON_MOUNT_FAIL[6]="false"
+ARR_CONTAINER[6]="prowlarr"
+ARR_URL[6]="http://192.168.1.1:9696/prowlarr"
+ARR_API_KEY[6]="YOUR_API_KEY_HERE"
+ARR_TYPE[6]="arr"
 
 
 # ==============================================================================
@@ -188,11 +203,33 @@ show_uptime_summary() {
     echo "--------------------------------------------------"
 }
 
-check_arr() {
+query_api() {
+    local container_name="$1"
+    local url="$2"
+    local api_key="$3"
+    local app_type="$4"
+
+    if [ "$app_type" == "plex" ]; then
+        # Plex uses /identity endpoint and X-Plex-Token header
+        curl -s -o /dev/null -w "%{http_code}" \
+          --max-time "$TIMEOUT_SECONDS" \
+          -H "X-Plex-Token: $api_key" \
+          "$url/identity"
+    else
+        # Standard Arr applications use /api/v3/system/status and X-Api-Key header
+        curl -s -o /dev/null -w "%{http_code}" \
+          --max-time "$TIMEOUT_SECONDS" \
+          -H "X-Api-Key: $api_key" \
+          "$url/api/v3/system/status"
+    fi
+}
+
+check_app() {
     local enabled="$1"
     local container_name="$2"
     local url="$3"
     local api_key="$4"
+    local app_type="${5:-arr}"
 
     if [ "$enabled" != "true" ]; then
         echo "Skipping $container_name (heartbeat check is disabled)."
@@ -209,17 +246,37 @@ check_arr() {
 
     echo "Checking $container_name health status..."
 
-    local http_status
-    http_status=$(curl -s -o /dev/null -w "%{http_code}" \
-      --max-time "$TIMEOUT_SECONDS" \
-      -H "X-Api-Key: $api_key" \
-      "$url/api/v3/system/status")
+    # Check if container is running; if it was stopped (e.g. via mount failure), do not attempt curl or restart
+    local is_running
+    is_running=$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null)
 
-    if [ "$http_status" -eq 200 ]; then
+    if [ "$is_running" != "true" ]; then
+        echo "Skipping heartbeat for '$container_name' (container is currently stopped)."
+        echo ""
+        return 0
+    fi
+
+    # Retry loop to eliminate transient API delays/timeouts
+    local http_status=0
+    local success=false
+
+    for (( attempt=1; attempt<=MAX_RETRIES; attempt++ )); do
+        http_status=$(query_api "$container_name" "$url" "$api_key" "$app_type")
+
+        if [ "$http_status" -eq 200 ]; then
+            success=true
+            break
+        else
+            echo "Attempt $attempt/$MAX_RETRIES failed for $container_name (HTTP Code: $http_status). Retrying in ${RETRY_DELAY}s..."
+            sleep "$RETRY_DELAY"
+        fi
+    done
+
+    if [ "$success" == "true" ]; then
         echo "Success: $container_name is responding normally (HTTP 200)."
         show_uptime_summary "$container_name" "$restart_log"
     else
-        echo "Warning: $container_name failed to respond. HTTP Status code: $http_status"
+        echo "Error: $container_name failed $MAX_RETRIES health checks. Last HTTP Status code: $http_status"
         echo "Logging crash event and restarting container '$container_name'..."
         
         date +%s >> "$restart_log"
@@ -250,13 +307,14 @@ if ! verify_mounts; then
     exit 1
 fi
 
-# Process enabled Arr instances
+# Process enabled Application instances
 for i in "${!ARR_ENABLED[@]}"; do
-    check_arr \
+    check_app \
         "${ARR_ENABLED[$i]}" \
         "${ARR_CONTAINER[$i]}" \
         "${ARR_URL[$i]}" \
-        "${ARR_API_KEY[$i]}"
+        "${ARR_API_KEY[$i]}" \
+        "${ARR_TYPE[$i]}"
 done
 
 exit 0
