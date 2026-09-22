@@ -1,56 +1,79 @@
 #!/bin/bash
 ##### ======================================================================================
-##### SCRIPT: Rclone Heartbeat
-##### VERSION: v1.0-RC2.0.33 (Flock Inherit Fix & Child FD Closure)
-##### DESCRIPTION: Monitors containerized and host-side Rclone mounts.
+##### SCRIPT: Rclone Mount
+##### VERSION: v1.0-RC3.0 (Code Streamlining, Modular Configuration & Neutral Guidance)
+##### DESCRIPTION: Monitors, audits, and auto-heals containerized and host-side Rclone mounts.
 ##### ======================================================================================
 
 ##### --------------------------------------------------------------------------------------
-##### 1. USER CONFIGURATION
+##### 1.0 USER CONFIGURATION
 ##### --------------------------------------------------------------------------------------
 
-##### --- SCRIPT SETTINGS ---
-SCRIPT_VERSION="v1.0-RC2.0.33"
-STATE_FILE="/mnt/cache/appdata/other/scripts/rclone/prime_state.db"
-LOG_FILE="/mnt/cache/appdata/other/scripts/rclone/rclone_mount.log"
-FORCE_RESET="N"
+##### --- 1.1 SCRIPT & STORAGE PATHS ---
+# Paths for persistent state tracking, logging, and process lock files.
+SCRIPT_VERSION="v1.0-RC3.0"
+STATE_FILE="/mnt/cache/appdata/other/scripts/rclone/prime_state.db"    # File used to store mount state across runs
+LOG_FILE="/mnt/cache/appdata/other/scripts/rclone/rclone_mount.log"    # Log file destination for mount operations
+LOCKFILE="/var/run/rclone_mount_heartbeat.lock"                        # Lockfile path to prevent overlapping executions
+FORCE_RESET="N"                                                        # Default flag for forced reset mode ("Y" or "N")
 
-##### --- REQUIRED SETTINGS ---
-REMOTE_NAME="nzbdav:"                                                                           # Rclone remote name including colon
-RCLONE_CONF="/boot/config/plugins/rclone/.rclone.conf"
-MOUNT_PATH="/mnt/cache/streaming/nzbdav"                                                         # full path to where remote should be mounted
-MEDIA_PATH="/mnt/cache/media"
-VFS_CACHE_DIR="/mnt/samsung/streaming_cache/nzbdav"                                            # Path for rclone cache files
-VFS_CACHE_SIZE="100G"                                                                           # Maximum size of the VFS cache
-CACHE_DRIVE_SIZE="250G"
-VFS_CACHE_AGE="2d"
-VFS_READ_AHEAD="0M"
-VFS_CHUNK_LIMIT="1024M"
-VFS_MODE="off"                                                                                  # --vfs-cache-mode mode
-CHUNK_START="8M"
-RAM_BUFFER="512M"
-CACHE_TIME="30d"
+##### --- 1.2 RCLONE REMOTE & MOUNT SETTINGS ---
+# Core path and remote configurations for primary and secondary mounts.
+REMOTE_NAME="nzbdav:"                                                  # Rclone remote name as defined in rclone.conf (include trailing colon)
+RCLONE_CONF="/boot/config/plugins/rclone/.rclone.conf"                 # Path to rclone configuration file
+MOUNT_PATH="/mnt/cache/streaming/nzbdav"                               # Host mount point for primary remote
+MEDIA_PATH="/mnt/cache/media"                                          # Host media directory for background warming/priming
+DECYPH_PATH="/mnt/cache/streaming/decypharr"                           # Host mount point for secondary remote (leave empty to disable)
 
-##### --- OPTIONAL MOUNT SETTINGS ---
-DECYPH_PATH="/mnt/cache/streaming/decypharr"                                                     # Location of your Decypharr mount
-RC_IP="0.0.0.0"                                                                                 # Bind to all interfaces for Docker access
-RC_PORT="5573"                                                                                   # NzbDAV remote control port
-RC_PORT_DEC="5572"                                                                               # Decypharr remote control port
-RC_USER="your_username"
-RC_PASS="your_password"
-CPU_PIN="4,5,6,7,20,21,22,23"                                                                   # Cores to lock rclone to
+##### --- 1.3 RCLONE MOUNT PERFORMANCE & PERMISSION SETTINGS ---
+# Mount process ownership, CPU affinity, and FUSE filesystem permission flags.
+MOUNT_UID="99"                                                         # User ID assigned to mounted files (e.g., 99 for nobody)
+MOUNT_GID="100"                                                        # Group ID assigned to mounted files (e.g., 100 for users)
+MOUNT_UMASK="000"                                                      # Octal umask for file permissions (e.g., 000 for full read/write)
+CPU_PIN="4,5,6,7,20,21,22,23"                                          # Comma-separated CPU cores/threads to pin Rclone process to
 
-CONNECTION_TIMEOUT="15s"
-TIMEOUT="45s"
-LOW_LEVEL_RETRIES="3"
+# Rclone Performance Toggles (Set to "true" or "false")
+ENABLE_NO_MODTIME="true"                                               # Disable file modification time updates to reduce I/O overhead
+ENABLE_NO_CHECKSUM="true"                                              # Disable file checksum verification for faster directory reads
 
-##### --- DOCKER & COMPOSE SETTINGS ---
-NZBDAV_CONTAINER="nzbdav"
-DECYPHAR_CONTAINER="Decypharr"
-USE_COMPOSE="true"
+##### --- 1.4 VFS CACHE & NETWORK TUNING ---
+# Rclone Virtual File System (VFS) cache and connection parameters.
+VFS_MODE="off"                                                         # Cache mode: off, minimal, writes, or full
+VFS_CACHE_DIR="/mnt/samsung/streaming_cache/nzbdav"                    # Directory path for VFS disk cache
+VFS_CACHE_SIZE="10G"                                                   # Maximum disk space allocated to VFS cache
+VFS_CACHE_AGE="2d"                                                     # Time before unused cached files are purged
+VFS_READ_AHEAD="0M"                                                    # Buffer size for VFS read-ahead stream. Should be disabled if segment cache is used
+CHUNK_START="8M"                                                       # Initial chunk size for VFS read requests
+VFS_CHUNK_LIMIT="1024M"                                                # Maximum chunk size expansion limit
+RAM_BUFFER="512M"                                                      # Memory buffer per open file
+CACHE_TIME="30d"                                                       # Directory structure cache duration in memory
+POLL_INTERVAL="0"                                                      # Polling interval (0 disables polling for WebDAV remotes)
 
+CONNECTION_TIMEOUT="15s"                                               # Timeout for establishing initial remote connection
+TIMEOUT="45s"                                                          # Read timeout for active network requests
+LOW_LEVEL_RETRIES="3"                                                  # Maximum low-level retry attempts before reporting failure
+
+##### --- 1.5 REMOTE CONTROL (RC) API SETTINGS ---
+# Parameters for Rclone built-in Remote Control HTTP engine.
+RC_IP="0.0.0.0"                                                        # IP interface for RC server to bind to (0.0.0.0 for all interfaces)
+RC_PORT="5573"                                                         # Port for primary (IOn) Rclone RC API
+RC_PORT_DEC="5572"                                                     # Port for secondary (Decypharr) Rclone RC API
+RC_USER="YOUR_USERNAME"                                                # Username for RC authentication (leave blank if unauthenticated)
+RC_PASS="YOUR_PASSWORD"                                                # Password for RC authentication
+
+##### --- 1.6 DOCKER & CONTAINER RESTORATION SETTINGS ---
+# Container definitions and compose project mappings for automated recovery.
+NZBDAV_CONTAINER="nzbdav"                                              # Container name for primary WebDAV service
+DECYPHAR_CONTAINER="Decypharr"                                         # Container name for secondary mount service
+DECYPHARR_PORT="8282"                                                  # Web UI port for Decypharr health check
+
+# Space-separated list of client application containers dependent on active mounts
 CONTAINERS="autopulse byparr prowlarr postgresql16 autoheal plex emby tautulli seerr wizarr radarr sonarr lidarr posterizarr kometa chaptarr komga silo_postgres silo_redis silo_minio silo_meilisearch silo_ollama silo_whisper silo_server"
 
+# GUIDANCE: CONTAINER_PROJECTS maps individual container names to their parent Docker Compose directory.
+# REASON: When restoring containers after a mount rebuild, standard 'docker start' can bypass Docker Compose
+# dependency chains, custom networks, or environment files. Mapping containers here allows the script to run
+# 'docker compose up -d --no-deps' in the project directory, preserving the container's full Compose environment.
 declare -A CONTAINER_PROJECTS
 CONTAINER_PROJECTS=(
     ["postgresql16"]="/mnt/cache/appdata/projects/12-15"
@@ -58,7 +81,6 @@ CONTAINER_PROJECTS=(
     ["autopulse"]="/mnt/cache/appdata/projects/0"
     ["bazarr"]="/mnt/cache/appdata/projects/12-15"
     ["chaptarr"]="/mnt/cache/appdata/projects/12-15"
-    ["houndarr"]="/mnt/cache/appdata/projects/12-15"
     ["lidarr"]="/mnt/cache/appdata/projects/12-15"
     ["prowlarr"]="/mnt/cache/appdata/projects/12-15"
     ["radarr"]="/mnt/cache/appdata/projects/12-15"
@@ -81,127 +103,131 @@ CONTAINER_PROJECTS=(
 )
 
 ##### --------------------------------------------------------------------------------------
-##### 2. MAIN SCRIPT - DO NOT EDIT BELOW HERE!
+##### 2.0 INITIALIZATION & ENVIRONMENT READINESS
 ##### --------------------------------------------------------------------------------------
-log_step() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" ; }
+
+##### --- 2.1 HELPER FUNCTIONS & SIGNAL HANDLING ---
+log_step() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
 
 send_notification() {
-    local subject="$1"
-    local message="$2"
-    local importance="$3"
+    local subject="$1" message="$2" importance="$3"
     /usr/local/emhttp/webGui/scripts/notify -e "Rclone Heartbeat" -s "$subject" -d "$message" -i "$importance" 2>/dev/null || true
 }
 
-##### --- SECTION 2.1: STARTUP PREPARATION & FLOCK ---
+is_container_running() {
+    local name="$1"
+    [[ -n "$name" ]] && [[ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" == "true" ]]
+}
+
+unmount_path() {
+    local target="$1"
+    [[ -z "$target" ]] && return 0
+    fusermount -uz "$target" >/dev/null 2>&1 || true
+    umount -l "$target" >/dev/null 2>&1 || true
+    if [ -d "$target" ] && [ "$(ls -A "$target" 2>/dev/null)" ]; then
+        log_step "WARN: Stray files found in $target. Clearing directory..."
+        rm -rf "$target"/* 2>/dev/null || true
+    fi
+}
+
+check_decypharr_health() {
+    local validation_file="$DECYPH_PATH/version.txt"
+    local mount_ok=false ui_ok=false
+
+    if is_container_running "$DECYPHAR_CONTAINER" && grep -q "$DECYPH_PATH" /etc/mtab && timeout 5s stat "$validation_file" >/dev/null 2>&1; then
+        mount_ok=true
+    fi
+
+    local http_code
+    http_code=$(curl -s -L -o /dev/null -w "%{http_code}" --max-time 5 "http://localhost:${DECYPHARR_PORT}/" || echo "000")
+    if [[ "$http_code" -eq 200 || "$http_code" -eq 303 ]]; then
+        ui_ok=true
+    fi
+
+    echo "$http_code"
+    if [[ "$mount_ok" == "true" ]] && [[ "$ui_ok" == "true" ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Process lock management
 if [[ "$*" == *"-f"* ]] || [[ "$*" == *"--force"* ]]; then
     FORCE_RESET="Y"
 fi
 
-LOCKFILE="/var/run/rclone_mount_heartbeat.lock"
-
-# Handle Hard Reset termination quietly (redirect stdout and stderr to prevent PID dumps in log)
 if [[ "$FORCE_RESET" == "Y" ]]; then
-    log_step "[FORCE RESET] Terminating any existing/stuck Heartbeat instances..."
+    log_step "[FORCE RESET] Terminating existing Heartbeat instances & clearing lock..."
     pkill -9 -f "rclone_mount_heartbeat" >/dev/null 2>&1 || true
     fuser -k -9 "$LOCKFILE" >/dev/null 2>&1 || true
     sleep 1
 fi
 
-# Register exit cleanup trap to release flock and close descriptor
 cleanup() {
     flock -u 9 2>/dev/null || true
     exec 9>&- 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM HUP
 
-# Acquire flock on lockfile descriptor
 exec 9>"$LOCKFILE"
 if ! flock -n 9; then
     log_step "[ABORT] Script is already running (PID $(cat "$LOCKFILE" 2>/dev/null)). Exiting."
     exit 1
 fi
-
-# Store active PID in lockfile descriptor
 echo $$ >&9
+
+##### --- 2.2 ENVIRONMENT PREPARATION & CONFIG SUMMARY ---
+mkdir -p "$(dirname "$STATE_FILE")" "$(dirname "$LOG_FILE")" "$VFS_CACHE_DIR"
 
 log_step "VALIDATING: Script configuration and environment..."
 log_step "---------------------------------------------------"
 log_step "[CONFIG SUMMARY]"
 log_step "Script Version: $SCRIPT_VERSION"
-log_step "Mode: $( [[ "$FORCE_RESET" == "Y" ]] && echo "HARD RESET (-f)" || echo "HEARTBEAT MONITOR" )"
+log_step "Execution Mode: $( [[ "$FORCE_RESET" == "Y" ]] && echo "HARD RESET (-f)" || echo "HEARTBEAT MONITOR" )"
 log_step "Rclone Remote: $REMOTE_NAME"
 log_step "State File: $STATE_FILE"
-log_step ""
-log_step "[DOCKER SETTINGS]"
-log_step "NzbDAV Container: $NZBDAV_CONTAINER"
-log_step "Decypharr Container: $DECYPHAR_CONTAINER"
+log_step "Primary Container: $NZBDAV_CONTAINER"
+log_step "Secondary Container: $DECYPHAR_CONTAINER"
 log_step "---------------------------------------------------"
 
-##### --- SECTION 2.2: ENVIRONMENTAL READINESS ---
-mkdir -p "$(dirname "$STATE_FILE")"
-mkdir -p "$(dirname "$LOG_FILE")"
-mkdir -p "$VFS_CACHE_DIR"
-
-##### ======================================================================================
-##### BRANCH A: FORCED HARD RESET MODE (-f)
-##### ======================================================================================
+##### --- 2.3 HARD RESET EXECUTION (-f) ---
 if [[ "$FORCE_RESET" == "Y" ]]; then
     log_step "======================================================================================"
-    log_step "HARD RESET INITIATED: Stopping client containers, tearing down mounts, starting core containers."
+    log_step "HARD RESET INITIATED: Stopping client containers, tearing down mounts, restarting backends."
     log_step "======================================================================================"
 
-    # 1. STOP ALL CLIENT CONTAINERS
-    log_step "[RESET 1/4] Stopping all client application containers..."
+    # 1. Stop all client containers
+    log_step "[RESET 1/4] Stopping client application containers..."
     for container in $CONTAINERS; do
         if [[ "$container" != "$NZBDAV_CONTAINER" ]] && [[ "$container" != "$DECYPHAR_CONTAINER" ]]; then
-            if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" == "true" ]; then
+            if is_container_running "$container"; then
                 log_step "  -> Stopping container: $container..."
                 docker stop "$container" >/dev/null 2>&1 || true
             fi
         fi
     done
-    log_step "  -> All client containers stopped."
 
-    # 2. TEAR DOWN NZBDAV HOST MOUNT & CLEAR RCLONE PROCESSES (DO NOT REMOUNT)
-    log_step "[RESET 2/4] Unmounting NzbDAV host path ($MOUNT_PATH) and clearing host rclone processes..."
-    fusermount -uz "$MOUNT_PATH" > /dev/null 2>&1 || true
-    umount -l "$MOUNT_PATH" > /dev/null 2>&1 || true
-    fuser -k "${RC_PORT}/tcp" > /dev/null 2>&1 || true
-    pkill -9 -f "rclone mount $REMOTE_NAME" > /dev/null 2>&1 || true
+    # 2. Teardown primary host mount & rclone process
+    log_step "[RESET 2/4] Unmounting primary host path ($MOUNT_PATH)..."
+    unmount_path "$MOUNT_PATH"
+    fuser -k "${RC_PORT}/tcp" >/dev/null 2>&1 || true
+    pkill -9 -f "rclone mount $REMOTE_NAME" >/dev/null 2>&1 || true
 
-    if [ -d "$MOUNT_PATH" ] && [ "$(ls -A "$MOUNT_PATH" 2>/dev/null)" ]; then
-        log_step "  -> Clearing stray files in $MOUNT_PATH..."
-        rm -rf "$MOUNT_PATH"/* 2>/dev/null || true
-    fi
-    log_step "  -> NzbDAV host mount successfully torn down and kept DOWN."
-
-    # 3. ENSURE NZBDAV & DECYPHARR CONTAINERS ARE UP
-    log_step "[RESET 3/4] Ensuring Core Containers ($NZBDAV_CONTAINER & $DECYPHAR_CONTAINER) are UP..."
-
-    log_step "  -> Restarting $NZBDAV_CONTAINER container..."
-    docker restart "$NZBDAV_CONTAINER" > /dev/null 2>&1 || docker start "$NZBDAV_CONTAINER" > /dev/null 2>&1
-
-    log_step "  -> Restarting $DECYPHAR_CONTAINER container..."
-    docker restart "$DECYPHAR_CONTAINER" > /dev/null 2>&1 || docker start "$DECYPHAR_CONTAINER" > /dev/null 2>&1
-
-    log_step "  -> Waiting 8 seconds for core container engines to initialize..."
+    # 3. Ensure core backend containers are active
+    log_step "[RESET 3/4] Restarting core containers ($NZBDAV_CONTAINER & $DECYPHAR_CONTAINER)..."
+    docker restart "$NZBDAV_CONTAINER" >/dev/null 2>&1 || docker start "$NZBDAV_CONTAINER" >/dev/null 2>&1
+    docker restart "$DECYPHAR_CONTAINER" >/dev/null 2>&1 || docker start "$DECYPHAR_CONTAINER" >/dev/null 2>&1
     sleep 8
 
-    # 4. AUDIT DECYPHARR CONTAINER STATUS
-    log_step "[RESET 4/4] Verifying Decypharr responsiveness..."
-    DECYPHARR_PORT="8282"
+    # 4. Audit Decypharr status after restart
+    log_step "[RESET 4/4] Verifying secondary container status..."
     DEC_STATE="DOWN"
     DEC_START_TS=$(date +%s)
-
-    if [ "$(docker inspect -f '{{.State.Running}}' "$DECYPHAR_CONTAINER" 2>/dev/null)" == "true" ]; then
-        UI_HTTP_CODE=$(curl -s -L -o /dev/null -w "%{http_code}" --max-time 5 "http://localhost:${DECYPHARR_PORT}/" || echo "000")
-        if [[ "$UI_HTTP_CODE" -eq 200 || "$UI_HTTP_CODE" -eq 303 ]]; then
-            DEC_STATE="UP"
-            log_step "  -> Decypharr Container & UI are ONLINE (HTTP $UI_HTTP_CODE)."
-        else
-            log_step "  -> WARNING: Decypharr container running, UI returned HTTP $UI_HTTP_CODE."
-            DEC_STATE="UP"
-        fi
+    if is_container_running "$DECYPHAR_CONTAINER"; then
+        UI_CODE=$(check_decypharr_health || true)
+        DEC_STATE="UP"
+        log_step "  -> Decypharr Container & UI checked (HTTP $UI_CODE)."
     else
         log_step "  -> ERROR: Decypharr container failed to start."
     fi
@@ -209,109 +235,93 @@ if [[ "$FORCE_RESET" == "Y" ]]; then
     NZB_STATE="DOWN"
     NZB_START_TS=$(date +%s)
 
-    # SAVE STATE
     {
-        echo "NZB_STATE="$NZB_STATE""
-        echo "NZB_START_TS="$NZB_START_TS""
-        echo "DEC_STATE="$DEC_STATE""
-        echo "DEC_START_TS="$DEC_START_TS""
+        echo "NZB_STATE=\"$NZB_STATE\""
+        echo "NZB_START_TS=\"$NZB_START_TS\""
+        echo "DEC_STATE=\"$DEC_STATE\""
+        echo "DEC_START_TS=\"$DEC_START_TS\""
     } > "$STATE_FILE"
 
     log_step "======================================================================================"
     log_step "HARD RESET SUMMARY:"
-    log_step "  - NzbDAV Container ($NZBDAV_CONTAINER): UP"
-    log_step "  - Decypharr Container ($DECYPHAR_CONTAINER): $DEC_STATE"
-    log_step "  - NzbDAV Host Mount ($MOUNT_PATH): DOWN (Unmounted)"
-    log_step "  - Client Containers: ALL DOWN"
+    log_step "  - Primary Container ($NZBDAV_CONTAINER): UP"
+    log_step "  - Secondary Container ($DECYPHAR_CONTAINER): $DEC_STATE"
+    log_step "  - Primary Host Mount ($MOUNT_PATH): DOWN (Unmounted)"
+    log_step "  - Client Containers: ALL STOPPED"
     log_step "STATUS: Hard Reset Complete."
     log_step "======================================================================================"
     exit 0
 fi
 
-##### ======================================================================================
-##### BRANCH B: STANDARD HEARTBEAT MONITOR MODE
-##### ======================================================================================
+##### --------------------------------------------------------------------------------------
+##### 3.0 SERVICE & MOUNT AUDIT (HEARTBEAT MONITOR)
+##### --------------------------------------------------------------------------------------
 
-##### --- SECTION 2.3: FOUNDATION CHECK ---
-log_step "Ensuring Core services are active..."
+##### --- 3.1 CORE SERVICE FOUNDATION CHECK ---
+log_step "Ensuring Core backend services are active..."
 STARTED_ANY=false
 for container in "$NZBDAV_CONTAINER" "$DECYPHAR_CONTAINER"; do
-    if [[ -n "$container" ]]; then
-        if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" != "true" ]; then
-            log_step "Starting $container..."
-            docker start "$container" > /dev/null 2>&1
-            STARTED_ANY=true
-        fi
+    if [[ -n "$container" ]] && ! is_container_running "$container"; then
+        log_step "Starting core container: $container..."
+        docker start "$container" >/dev/null 2>&1 || true
+        STARTED_ANY=true
     fi
 done
-if [ "$STARTED_ANY" == "true" ]; then
-    log_step "Waiting 8 seconds for containerized rclone storage layers to settle..."
+if [[ "$STARTED_ANY" == "true" ]]; then
+    log_step "Waiting 8 seconds for storage layers to settle..."
     sleep 8
 fi
 
-##### --- SECTION 2.4: NZBDAV MOUNT AUDIT ---
+##### --- 3.2 PRIMARY MOUNT AUDIT (NZBDAV) ---
 [ -f "$STATE_FILE" ] && source "$STATE_FILE"
 VALIDATION_FILE="$MOUNT_PATH/README"
-log_step "CHECKING: NzbDAV Mount integrity..."
+log_step "CHECKING: Primary mount integrity ($MOUNT_PATH)..."
 NZB_MOUNT_ALIVE=false
 
-if [ "$(docker inspect -f '{{.State.Running}}' "$NZBDAV_CONTAINER" 2>/dev/null)" == "true" ] && grep -q "$MOUNT_PATH" /etc/mtab; then
+if is_container_running "$NZBDAV_CONTAINER" && grep -q "$MOUNT_PATH" /etc/mtab; then
     N_COUNT=0
     while [ $N_COUNT -lt 5 ]; do
-        if timeout 5s stat "$VALIDATION_FILE" > /dev/null 2>&1; then
+        if timeout 5s stat "$VALIDATION_FILE" >/dev/null 2>&1; then
             NZB_MOUNT_ALIVE=true
-            log_step "SUCCESS: NzbDAV Mount is ONLINE."
+            log_step "SUCCESS: Primary mount is ONLINE."
             break
         fi
-        log_step "WAITING: NzbDAV mount stalling (Attempt $((N_COUNT + 1))/5)..."
+        log_step "WAITING: Primary mount response stalling (Attempt $((N_COUNT + 1))/5)..."
         sleep 6
         ((N_COUNT++))
     done
 else
-    log_step "[!] NzbDAV process/mount missing."
+    log_step "[!] Primary process/mount missing."
 fi
 
-### Update NzbDAV State
+# Update Primary State
 if [[ "$NZB_MOUNT_ALIVE" == "true" ]]; then
     if [[ "$NZB_STATE" != "UP" ]]; then
         NZB_STATE="UP"
         NZB_START_TS=$(date +%s)
     fi
 else
-    log_step "[!] Failed: NzbDAV is DOWN."
-    send_notification "Mount Down" "NzbDAV mount failure detected at $MOUNT_PATH" "alert"
+    log_step "[!] Failed: Primary mount is DOWN."
+    send_notification "Mount Down" "Primary mount failure detected at $MOUNT_PATH" "alert"
     if [[ "$NZB_STATE" != "DOWN" ]]; then
         NZB_STATE="DOWN"
         NZB_START_TS=$(date +%s)
     fi
 fi
 
-##### --- SECTION 2.5: DECYPHARR MOUNT & UI AUDIT ---
+##### --- 3.3 SECONDARY MOUNT & UI AUDIT (DECYPHARR) ---
 DEC_MOUNT_ALIVE=false
-DEC_VALIDATION_FILE="$DECYPH_PATH/version.txt"
-DECYPHARR_PORT="8282"
-
 if [[ -n "$DECYPH_PATH" ]] && [[ -n "$DECYPHAR_CONTAINER" ]]; then
-    log_step "CHECKING: Decypharr Mount & UI responsiveness..."
+    log_step "CHECKING: Secondary mount & UI responsiveness ($DECYPH_PATH)..."
     D_COUNT=0
     while [ $D_COUNT -lt 5 ]; do
-        MOUNT_OK=false
-        if [ "$(docker inspect -f '{{.State.Running}}' "$DECYPHAR_CONTAINER" 2>/dev/null)" == "true" ] &&            grep -q "$DECYPH_PATH" /etc/mtab &&            timeout 5s stat "$DEC_VALIDATION_FILE" > /dev/null 2>&1; then
-            MOUNT_OK=true
-        fi
-
-        UI_HTTP_CODE=$(curl -s -L -o /dev/null -w "%{http_code}" --max-time 5 "http://localhost:${DECYPHARR_PORT}/" || echo "000")
-        UI_OK=false
-        if [[ "$UI_HTTP_CODE" -eq 200 || "$UI_HTTP_CODE" -eq 303 ]]; then
-            UI_OK=true
-        fi
-
-        if [[ "$MOUNT_OK" == "true" ]] && [[ "$UI_OK" == "true" ]]; then
+        UI_CODE=$(check_decypharr_health && echo "OK" || echo "FAIL")
+        if [[ "$UI_CODE" == *"OK"* ]]; then
             DEC_MOUNT_ALIVE=true
-            log_step "SUCCESS: Decypharr Mount and UI are ONLINE."
+            log_step "SUCCESS: Secondary mount and UI are ONLINE."
             break
         fi
-        log_step "WAITING: Decypharr mount/UI not ready (Attempt $((D_COUNT + 1))/5 | HTTP: $UI_HTTP_CODE)..."
+        log_step "WAITING: Secondary mount/UI not ready (Attempt $((D_COUNT + 1))/5)..."
         sleep 6
         ((D_COUNT++))
     done
@@ -322,8 +332,8 @@ if [[ -n "$DECYPH_PATH" ]] && [[ -n "$DECYPHAR_CONTAINER" ]]; then
             DEC_START_TS=$(date +%s)
         fi
     else
-        log_step "[!] Decypharr failed checks. Restarting container..."
-        docker restart "$DECYPHAR_CONTAINER" > /dev/null 2>&1
+        log_step "[!] Secondary service failed checks. Restarting container..."
+        docker restart "$DECYPHAR_CONTAINER" >/dev/null 2>&1 || true
         if [[ "$DEC_STATE" != "DOWN" ]]; then
             DEC_STATE="DOWN"
             DEC_START_TS=$(date +%s)
@@ -331,71 +341,76 @@ if [[ -n "$DECYPH_PATH" ]] && [[ -n "$DECYPHAR_CONTAINER" ]]; then
     fi
 fi
 
-##### --- SECTION 3.0: NZBDAV RECOVERY & FUSE CLEANUP ---
-if [[ "$NZB_MOUNT_ALIVE" == "false" ]]; then
-    log_step "REBUILD: Initiating Host-Side Rclone recovery for NzbDAV..."
+##### --------------------------------------------------------------------------------------
+##### 4.0 RECOVERY & FUSE REBUILD
+##### --------------------------------------------------------------------------------------
 
-    log_step "RESET: Stopping active client containers to release FUSE mount locks..."
+##### --- 4.1 PRIMARY MOUNT RECOVERY & RCLONE LAUNCH (NZBDAV) ---
+if [[ "$NZB_MOUNT_ALIVE" == "false" ]]; then
+    log_step "REBUILD: Initiating Rclone recovery for primary mount..."
+
+    log_step "RESET: Stopping active client containers to release mount locks..."
     for container in $CONTAINERS; do
-        if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" == "true" ]; then
+        if is_container_running "$container"; then
             docker stop "$container" >/dev/null 2>&1 || true
         fi
     done
 
-    log_step "REBUILD: Restarting NzbDAV backend container ($NZBDAV_CONTAINER)..."
-    docker restart "$NZBDAV_CONTAINER" > /dev/null 2>&1
+    log_step "REBUILD: Restarting primary container ($NZBDAV_CONTAINER)..."
+    docker restart "$NZBDAV_CONTAINER" >/dev/null 2>&1 || true
     sleep 8
 
-    log_step "REBUILD: Executing FUSE-First lazy unmount on $MOUNT_PATH..."
-    fusermount -uz "$MOUNT_PATH" > /dev/null 2>&1
-    umount -l "$MOUNT_PATH" > /dev/null 2>&1
+    log_step "REBUILD: Executing FUSE lazy unmount on $MOUNT_PATH..."
+    unmount_path "$MOUNT_PATH"
 
-    log_step "REBUILD: Unlocking RC Port $RC_PORT & clearing orphaned rclone processes..."
-    fuser -k "${RC_PORT}/tcp" > /dev/null 2>&1
+    log_step "REBUILD: Unlocking RC Port $RC_PORT & terminating orphaned rclone processes..."
+    fuser -k "${RC_PORT}/tcp" >/dev/null 2>&1 || true
 
-    # Clear stray files in mount point folder if left unmounted
-    if [ -d "$MOUNT_PATH" ] && [ "$(ls -A "$MOUNT_PATH" 2>/dev/null)" ]; then
-        log_step "WARN: Stray files found in $MOUNT_PATH. Clearing for clean mount..."
-        rm -rf "$MOUNT_PATH"/* 2>/dev/null || true
-    fi
-
-    # DYNAMIC RC ADDRESS (Uses RC_IP from settings)
+    # Construct Dynamic RC Arguments
     if [[ -n "$RC_USER" ]] && [[ -n "$RC_PASS" ]]; then
-        RC_ARGS="--rc --rc-addr ${RC_IP}:${RC_PORT} --rc-user ${RC_USER} --rc-pass ${RC_PASS}"
+        RC_ARGS=("--rc" "--rc-addr" "${RC_IP}:${RC_PORT}" "--rc-user" "${RC_USER}" "--rc-pass" "${RC_PASS}")
     else
-        RC_ARGS="--rc --rc-addr ${RC_IP}:${RC_PORT} --rc-no-auth"
+        RC_ARGS=("--rc" "--rc-addr" "${RC_IP}:${RC_PORT}" "--rc-no-auth")
     fi
+
+    # Construct Modular Rclone Command Array
+    RCLONE_FLAGS=(
+        mount "$REMOTE_NAME" "$MOUNT_PATH"
+        --config "$RCLONE_CONF"
+        --allow-other --uid "$MOUNT_UID" --gid "$MOUNT_GID" --umask "$MOUNT_UMASK"
+        --vfs-cache-mode "$VFS_MODE" --cache-dir "$VFS_CACHE_DIR"
+        --vfs-cache-max-age "$VFS_CACHE_AGE" --vfs-cache-max-size "$VFS_CACHE_SIZE"
+        --vfs-read-ahead "$VFS_READ_AHEAD" --vfs-read-chunk-size "$CHUNK_START" --vfs-read-chunk-size-limit "$VFS_CHUNK_LIMIT"
+        --buffer-size "$RAM_BUFFER" --dir-cache-time "$CACHE_TIME"
+        --contimeout "$CONNECTION_TIMEOUT" --timeout "$TIMEOUT" --low-level-retries "$LOW_LEVEL_RETRIES"
+        --poll-interval "$POLL_INTERVAL"
+        --links --use-cookies
+        "${RC_ARGS[@]}"
+        --log-level NOTICE --log-file "$LOG_FILE"
+    )
+
+    [[ "$ENABLE_NO_MODTIME" == "true" ]] && RCLONE_FLAGS+=(--no-modtime)
+    [[ "$ENABLE_NO_CHECKSUM" == "true" ]] && RCLONE_FLAGS+=(--no-checksum)
 
     LAUNCHER="taskset -c $CPU_PIN"
     log_step "Launching Rclone Mount with RC listening on ${RC_IP}:${RC_PORT}..."
-    nohup $LAUNCHER rclone mount "$REMOTE_NAME" "$MOUNT_PATH" \
-        --config "$RCLONE_CONF" \
-        --allow-other --uid 99 --gid 100 --umask 000 \
-        --vfs-cache-mode "$VFS_MODE" --cache-dir "$VFS_CACHE_DIR" \
-        --vfs-cache-max-age "$VFS_CACHE_AGE" --vfs-cache-max-size "$VFS_CACHE_SIZE" \
-        --vfs-read-ahead "$VFS_READ_AHEAD" --vfs-read-chunk-size "$CHUNK_START" --vfs-read-chunk-size-limit "$VFS_CHUNK_LIMIT" \
-        --buffer-size "$RAM_BUFFER" --dir-cache-time "$CACHE_TIME" \
-        --contimeout "$CONNECTION_TIMEOUT" --timeout "$TIMEOUT" --low-level-retries "$LOW_LEVEL_RETRIES" \
-        --no-modtime --no-checksum --poll-interval 0 --links --use-cookies \
-        $RC_ARGS \
-        --log-level NOTICE --log-file "$LOG_FILE" > /dev/null 2>&1 9>&- &
+    nohup $LAUNCHER rclone "${RCLONE_FLAGS[@]}" >/dev/null 2>&1 9>&- &
     disown $!
 
-    # STABILIZATION RETRY LOOP
+    # Stabilization Verification Loop
     COUNT=0
     while [ $COUNT -lt 5 ]; do
         if grep -q "$MOUNT_PATH" /etc/mtab && timeout 5s stat "$VALIDATION_FILE" >/dev/null 2>&1; then
-            log_step "REBUILD: NzbDAV mount recovered successfully on host."
-            send_notification "Mount Success" "NzbDAV mount restored." "normal"
+            log_step "REBUILD: Primary mount recovered successfully."
+            send_notification "Mount Success" "Primary mount restored at $MOUNT_PATH" "normal"
             NZB_MOUNT_ALIVE=true
             NZB_STATE="UP"
             NZB_START_TS=$(date +%s)
 
             log_step "REBUILD: Launching asynchronous background priming..."
             (
-                find $MEDIA_PATH '(' -type f -o -type l ')' -print > /tmp/media_symlinks.txt 2>/dev/null
-                xargs -d '
-' -a /tmp/media_symlinks.txt -P 64 -n 1000 stat -L >/dev/null 2>&1
+                find "$MEDIA_PATH" '(' -type f -o -type l ')' -print > /tmp/media_symlinks.txt 2>/dev/null
+                xargs -d '\n' -a /tmp/media_symlinks.txt -P 64 -n 1000 stat -L >/dev/null 2>&1
                 rm -f /tmp/media_symlinks.txt
                 logger "Rclone Priming: Background library warming complete."
             ) 9>&- &
@@ -407,50 +422,37 @@ if [[ "$NZB_MOUNT_ALIVE" == "false" ]]; then
     done
 
     if [[ "$NZB_MOUNT_ALIVE" == "false" ]]; then
-        log_step "CRITICAL ERROR: Host-side rclone mount failed to re-initialize."
+        log_step "CRITICAL ERROR: Primary mount failed to re-initialize."
     fi
 fi
 
-##### --- SECTION 3.5: DECYPHARR RECOVERY ---
-if [[ "$DEC_MOUNT_ALIVE" == "false" ]]; then
-    log_step "REBUILD: Initiating Decypharr recovery..."
-    log_step "REBUILD: Executing FUSE-First lazy unmount on $DECYPH_PATH..."
-    fusermount -uz "$DECYPH_PATH" > /dev/null 2>&1
-    umount -l "$DECYPH_PATH" > /dev/null 2>&1
+##### --- 4.2 SECONDARY MOUNT RECOVERY (DECYPHARR) ---
+if [[ "$DEC_MOUNT_ALIVE" == "false" ]] && [[ -n "$DECYPH_PATH" ]]; then
+    log_step "REBUILD: Initiating secondary mount recovery..."
+    unmount_path "$DECYPH_PATH"
 
-    log_step "REBUILD: Restarting Decypharr container ($DECYPHAR_CONTAINER)..."
-    docker restart "$DECYPHAR_CONTAINER" > /dev/null 2>&1
+    log_step "REBUILD: Restarting secondary container ($DECYPHAR_CONTAINER)..."
+    docker restart "$DECYPHAR_CONTAINER" >/dev/null 2>&1 || true
     sleep 8
 
     D_COUNT=0
     DEC_RECOVERED=false
     while [ $D_COUNT -lt 5 ]; do
-        MOUNT_OK=false
-        if [ "$(docker inspect -f '{{.State.Running}}' "$DECYPHAR_CONTAINER" 2>/dev/null)" == "true" ] &&            grep -q "$DECYPH_PATH" /etc/mtab &&            timeout 5s stat "$DEC_VALIDATION_FILE" > /dev/null 2>&1; then
-            MOUNT_OK=true
-        fi
-
-        UI_HTTP_CODE=$(curl -s -L -o /dev/null -w "%{http_code}" --max-time 5 "http://localhost:${DECYPHARR_PORT}/" || echo "000")
-        UI_OK=false
-        if [[ "$UI_HTTP_CODE" -eq 200 || "$UI_HTTP_CODE" -eq 303 ]]; then
-            UI_OK=true
-        fi
-
-        if [[ "$MOUNT_OK" == "true" ]] && [[ "$UI_OK" == "true" ]]; then
+        if check_decypharr_health >/dev/null 2>&1; then
             DEC_RECOVERED=true
-            log_step "REBUILD: Decypharr mount and UI recovered successfully."
+            log_step "REBUILD: Secondary mount and UI recovered successfully."
             DEC_STATE="UP"
             DEC_START_TS=$(date +%s)
             DEC_MOUNT_ALIVE=true
             break
         fi
-        log_step "WAITING: Decypharr mount/UI stabilizing (Attempt $((D_COUNT + 1))/5)..."
+        log_step "WAITING: Secondary mount/UI stabilizing (Attempt $((D_COUNT + 1))/5)..."
         sleep 6
         ((D_COUNT++))
     done
 
     if [[ "$DEC_RECOVERED" == "false" ]]; then
-        log_step "[!] Decypharr failed to stabilize after restart."
+        log_step "[!] Secondary mount failed to stabilize after restart."
         DEC_STATE="DOWN"
         DEC_START_TS=$(date +%s)
         DEC_MOUNT_ALIVE=false
@@ -462,16 +464,12 @@ if [[ "$NZB_MOUNT_ALIVE" == "false" ]]; then
     exit 1
 fi
 
-##### --- SAVE STATE ---
-{
-    echo "NZB_STATE="$NZB_STATE""
-    echo "NZB_START_TS="$NZB_START_TS""
-    echo "DEC_STATE="$DEC_STATE""
-    echo "DEC_START_TS="$DEC_START_TS""
-} > "$STATE_FILE"
+##### --------------------------------------------------------------------------------------
+##### 5.0 AUTO-HEAL RESTORATION & SUMMARY
+##### --------------------------------------------------------------------------------------
 
-##### --- SECTION 4.0: RESTORATION (AUTO-HEAL) ---
-log_step "RESTORATION: Ensuring all client applications are active..."
+##### --- 5.1 CLIENT CONTAINER RESTORATION ---
+log_step "RESTORATION: Ensuring all client application containers are active..."
 if [[ "$NZB_MOUNT_ALIVE" == "true" ]]; then
     for container in $CONTAINERS; do
         if [[ -n "$container" ]]; then
@@ -480,23 +478,27 @@ if [[ "$NZB_MOUNT_ALIVE" == "true" ]]; then
                 PROJECT_DIR="${CONTAINER_PROJECTS[$container]}"
                 if [ -n "$PROJECT_DIR" ] && [ -f "$PROJECT_DIR/docker-compose.yml" ]; then
                     log_step "Restoring compose container: $container (project: $PROJECT_DIR)..."
-                    (cd "$PROJECT_DIR" && docker compose up -d --no-deps "$container" > /dev/null 2>&1)
+                    (cd "$PROJECT_DIR" && docker compose up -d --no-deps "$container" >/dev/null 2>&1)
                     sleep 1
                 elif [ "$RUNNING_STATE" != "missing" ]; then
                     log_step "Restoring standalone container: $container..."
-                    docker start "$container" > /dev/null 2>&1
+                    docker start "$container" >/dev/null 2>&1
                     sleep 1
                 fi
             fi
         fi
     done
 else
-    log_step "[ABORT] Client restoration skipped. Primary NzbDAV mount is offline."
+    log_step "[ABORT] Client restoration skipped. Primary mount is offline."
 fi
 
-##### --- SECTION 5.0: FINAL SUMMARY ---
-log_step "FINALIZING: Generating summary report..."
-[ -f "$STATE_FILE" ] && source "$STATE_FILE"
+##### --- 5.2 STATE PERSISTENCE & FINAL SUMMARY ---
+{
+    echo "NZB_STATE=\"$NZB_STATE\""
+    echo "NZB_START_TS=\"$NZB_START_TS\""
+    echo "DEC_STATE=\"$DEC_STATE\""
+    echo "DEC_START_TS=\"$DEC_START_TS\""
+} > "$STATE_FILE"
 
 calculate_duration() {
     local ts=${1:-$(date +%s)}
@@ -504,12 +506,18 @@ calculate_duration() {
     local days=$((diff / 86400))
     local hours=$(((diff % 86400) / 3600))
     local mins=$(((diff % 3600) / 60))
-    [ $days -gt 0 ] && echo "${days}d ${hours}h ${mins}m" || ([ $hours -gt 0 ] && echo "${hours}h ${mins}m" || echo "${mins}m")
+    if [ $days -gt 0 ]; then
+        echo "${days}d ${hours}h ${mins}m"
+    elif [ $hours -gt 0 ]; then
+        echo "${hours}h ${mins}m"
+    else
+        echo "${mins}m"
+    fi
 }
 
-NZB_TIME=$(calculate_duration $NZB_START_TS)
+NZB_TIME=$(calculate_duration "${NZB_START_TS:-$(date +%s)}")
 if [[ -n "$DECYPHAR_CONTAINER" ]]; then
-    DEC_TIME=$(calculate_duration $DEC_START_TS)
+    DEC_TIME=$(calculate_duration "${DEC_START_TS:-$(date +%s)}")
     DEC_DISPLAY="${DEC_STATE} (${DEC_TIME})"
 else
     DEC_DISPLAY="DISABLED"
@@ -517,7 +525,7 @@ fi
 
 log_step ""
 log_step "Status Summary:"
-log_step "NzbDAV ${NZB_STATE} (${NZB_TIME}) | Decypharr ${DEC_DISPLAY}"
+log_step "Primary (${NZBDAV_CONTAINER}) ${NZB_STATE} (${NZB_TIME}) | Secondary (${DECYPHAR_CONTAINER}) ${DEC_DISPLAY}"
 log_step "--------------------------------------------------------------------------------------"
 log_step "STATUS: All Systems Operational."
 exit 0
