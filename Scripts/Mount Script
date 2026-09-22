@@ -24,7 +24,7 @@ VFS_CACHE_DIR="/mnt/samsung/streaming_cache/nzbdav"                             
 VFS_CACHE_SIZE="100G"                                                                           # Maximum size of the VFS cache
 CACHE_DRIVE_SIZE="250G"
 VFS_CACHE_AGE="2d"
-VFS_READ_AHEAD="512M"
+VFS_READ_AHEAD="0M"
 VFS_CHUNK_LIMIT="1024M"
 VFS_MODE="off"                                                                                  # --vfs-cache-mode mode
 CHUNK_START="8M"
@@ -368,7 +368,17 @@ if [[ "$NZB_MOUNT_ALIVE" == "false" ]]; then
 
     LAUNCHER="taskset -c $CPU_PIN"
     log_step "Launching Rclone Mount with RC listening on ${RC_IP}:${RC_PORT}..."
-    nohup $LAUNCHER rclone mount "$REMOTE_NAME" "$MOUNT_PATH"         --config "$RCLONE_CONF"         --allow-other         --vfs-cache-mode "$VFS_MODE"         --vfs-cache-max-age "$VFS_CACHE_AGE"         --vfs-cache-max-size "$VFS_CACHE_SIZE"         --vfs-read-ahead "$VFS_READ_AHEAD"         --vfs-read-chunk-size "$CHUNK_START"         --vfs-read-chunk-size-limit "$VFS_CHUNK_LIMIT"         --buffer-size "$RAM_BUFFER"         --dir-cache-time "$CACHE_TIME"         --cache-dir "$VFS_CACHE_DIR"         --contimeout "$CONNECTION_TIMEOUT"         --timeout "$TIMEOUT"         --low-level-retries "$LOW_LEVEL_RETRIES"         --uid 99 --gid 100 --umask 000         --no-modtime --no-checksum --poll-interval 0 --links --use-cookies         $RC_ARGS --log-level NOTICE --log-file "$LOG_FILE" > /dev/null 2>&1 9>&- &
+    nohup $LAUNCHER rclone mount "$REMOTE_NAME" "$MOUNT_PATH" \
+        --config "$RCLONE_CONF" \
+        --allow-other --uid 99 --gid 100 --umask 000 \
+        --vfs-cache-mode "$VFS_MODE" --cache-dir "$VFS_CACHE_DIR" \
+        --vfs-cache-max-age "$VFS_CACHE_AGE" --vfs-cache-max-size "$VFS_CACHE_SIZE" \
+        --vfs-read-ahead "$VFS_READ_AHEAD" --vfs-read-chunk-size "$CHUNK_START" --vfs-read-chunk-size-limit "$VFS_CHUNK_LIMIT" \
+        --buffer-size "$RAM_BUFFER" --dir-cache-time "$CACHE_TIME" \
+        --contimeout "$CONNECTION_TIMEOUT" --timeout "$TIMEOUT" --low-level-retries "$LOW_LEVEL_RETRIES" \
+        --no-modtime --no-checksum --poll-interval 0 --links --use-cookies \
+        $RC_ARGS \
+        --log-level NOTICE --log-file "$LOG_FILE" > /dev/null 2>&1 9>&- &
     disown $!
 
     # STABILIZATION RETRY LOOP
