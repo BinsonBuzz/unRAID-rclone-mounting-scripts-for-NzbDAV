@@ -1,7 +1,7 @@
 #!/bin/bash
 ##### ======================================================================================
 ##### SCRIPT: Rclone Mount
-##### VERSION: v1.0-RC3.0 (Code Streamlining, Modular Configuration & Neutral Guidance)
+##### VERSION: v1.0-RC3.4 (Single Validation File Check - Stripped Overengineering)
 ##### DESCRIPTION: Monitors, audits, and auto-heals containerized and host-side Rclone mounts.
 ##### ======================================================================================
 
@@ -11,7 +11,7 @@
 
 ##### --- 1.1 SCRIPT & STORAGE PATHS ---
 # Paths for persistent state tracking, logging, and process lock files.
-SCRIPT_VERSION="v1.0-RC3.0"
+SCRIPT_VERSION="v1.0-RC3.4"
 STATE_FILE="/mnt/cache/appdata/other/scripts/rclone/prime_state.db"    # File used to store mount state across runs
 LOG_FILE="/mnt/cache/appdata/other/scripts/rclone/rclone_mount.log"    # Log file destination for mount operations
 LOCKFILE="/var/run/rclone_mount_heartbeat.lock"                        # Lockfile path to prevent overlapping executions
@@ -44,7 +44,7 @@ VFS_CACHE_SIZE="10G"                                                   # Maximum
 VFS_CACHE_AGE="2d"                                                     # Time before unused cached files are purged
 VFS_READ_AHEAD="0M"                                                    # Buffer size for VFS read-ahead stream. Should be disabled if segment cache is used
 CHUNK_START="8M"                                                       # Initial chunk size for VFS read requests
-VFS_CHUNK_LIMIT="1024M"                                                # Maximum chunk size expansion limit
+VFS_CHUNK_LIMIT="off"                                                  # Maximum chunk size expansion limit
 RAM_BUFFER="512M"                                                      # Memory buffer per open file
 CACHE_TIME="30d"                                                       # Directory structure cache duration in memory
 POLL_INTERVAL="0"                                                      # Polling interval (0 disables polling for WebDAV remotes)
@@ -56,7 +56,7 @@ LOW_LEVEL_RETRIES="3"                                                  # Maximum
 ##### --- 1.5 REMOTE CONTROL (RC) API SETTINGS ---
 # Parameters for Rclone built-in Remote Control HTTP engine.
 RC_IP="0.0.0.0"                                                        # IP interface for RC server to bind to (0.0.0.0 for all interfaces)
-RC_PORT="5573"                                                         # Port for primary (IOn) Rclone RC API
+RC_PORT="5573"                                                         # Port for primary (NzbDAV) Rclone RC API
 RC_PORT_DEC="5572"                                                     # Port for secondary (Decypharr) Rclone RC API
 RC_USER="YOUR_USERNAME"                                                # Username for RC authentication (leave blank if unauthenticated)
 RC_PASS="YOUR_PASSWORD"                                                # Password for RC authentication
@@ -67,13 +67,10 @@ NZBDAV_CONTAINER="nzbdav"                                              # Contain
 DECYPHAR_CONTAINER="Decypharr"                                         # Container name for secondary mount service
 DECYPHARR_PORT="8282"                                                  # Web UI port for Decypharr health check
 
-# Space-separated list of client application containers dependent on active mounts
+# Space-separated list of client application containers dependent on active mounts (Exact source match)
 CONTAINERS="autopulse byparr prowlarr postgresql16 autoheal plex emby tautulli seerr wizarr radarr sonarr lidarr posterizarr kometa chaptarr komga silo_postgres silo_redis silo_minio silo_meilisearch silo_ollama silo_whisper silo_server"
 
 # GUIDANCE: CONTAINER_PROJECTS maps individual container names to their parent Docker Compose directory.
-# REASON: When restoring containers after a mount rebuild, standard 'docker start' can bypass Docker Compose
-# dependency chains, custom networks, or environment files. Mapping containers here allows the script to run
-# 'docker compose up -d --no-deps' in the project directory, preserving the container's full Compose environment.
 declare -A CONTAINER_PROJECTS
 CONTAINER_PROJECTS=(
     ["postgresql16"]="/mnt/cache/appdata/projects/12-15"
@@ -132,20 +129,7 @@ unmount_path() {
 
 check_decypharr_health() {
     local validation_file="$DECYPH_PATH/version.txt"
-    local mount_ok=false ui_ok=false
-
-    if is_container_running "$DECYPHAR_CONTAINER" && grep -q "$DECYPH_PATH" /etc/mtab && timeout 5s stat "$validation_file" >/dev/null 2>&1; then
-        mount_ok=true
-    fi
-
-    local http_code
-    http_code=$(curl -s -L -o /dev/null -w "%{http_code}" --max-time 5 "http://localhost:${DECYPHARR_PORT}/" || echo "000")
-    if [[ "$http_code" -eq 200 || "$http_code" -eq 303 ]]; then
-        ui_ok=true
-    fi
-
-    echo "$http_code"
-    if [[ "$mount_ok" == "true" ]] && [[ "$ui_ok" == "true" ]]; then
+    if [ -f "$validation_file" ]; then
         return 0
     else
         return 1
@@ -227,7 +211,7 @@ if [[ "$FORCE_RESET" == "Y" ]]; then
     if is_container_running "$DECYPHAR_CONTAINER"; then
         UI_CODE=$(check_decypharr_health || true)
         DEC_STATE="UP"
-        log_step "  -> Decypharr Container & UI checked (HTTP $UI_CODE)."
+        log_step "  -> Decypharr Container & UI checked."
     else
         log_step "  -> ERROR: Decypharr container failed to start."
     fi
@@ -278,21 +262,17 @@ VALIDATION_FILE="$MOUNT_PATH/README"
 log_step "CHECKING: Primary mount integrity ($MOUNT_PATH)..."
 NZB_MOUNT_ALIVE=false
 
-if is_container_running "$NZBDAV_CONTAINER" && grep -q "$MOUNT_PATH" /etc/mtab; then
-    N_COUNT=0
-    while [ $N_COUNT -lt 5 ]; do
-        if timeout 5s stat "$VALIDATION_FILE" >/dev/null 2>&1; then
-            NZB_MOUNT_ALIVE=true
-            log_step "SUCCESS: Primary mount is ONLINE."
-            break
-        fi
-        log_step "WAITING: Primary mount response stalling (Attempt $((N_COUNT + 1))/5)..."
-        sleep 6
-        ((N_COUNT++))
-    done
-else
-    log_step "[!] Primary process/mount missing."
-fi
+N_COUNT=0
+while [ $N_COUNT -lt 5 ]; do
+    if [ -f "$VALIDATION_FILE" ]; then
+        NZB_MOUNT_ALIVE=true
+        log_step "SUCCESS: Primary mount is ONLINE."
+        break
+    fi
+    log_step "WAITING: Primary mount validation file unreadable (Attempt $((N_COUNT + 1))/5)..."
+    sleep 6
+    ((N_COUNT++))
+done
 
 # Update Primary State
 if [[ "$NZB_MOUNT_ALIVE" == "true" ]]; then
@@ -312,16 +292,15 @@ fi
 ##### --- 3.3 SECONDARY MOUNT & UI AUDIT (DECYPHARR) ---
 DEC_MOUNT_ALIVE=false
 if [[ -n "$DECYPH_PATH" ]] && [[ -n "$DECYPHAR_CONTAINER" ]]; then
-    log_step "CHECKING: Secondary mount & UI responsiveness ($DECYPH_PATH)..."
+    log_step "CHECKING: Secondary mount responsiveness ($DECYPH_PATH)..."
     D_COUNT=0
     while [ $D_COUNT -lt 5 ]; do
-        UI_CODE=$(check_decypharr_health && echo "OK" || echo "FAIL")
-        if [[ "$UI_CODE" == *"OK"* ]]; then
+        if check_decypharr_health; then
             DEC_MOUNT_ALIVE=true
-            log_step "SUCCESS: Secondary mount and UI are ONLINE."
+            log_step "SUCCESS: Secondary mount is ONLINE."
             break
         fi
-        log_step "WAITING: Secondary mount/UI not ready (Attempt $((D_COUNT + 1))/5)..."
+        log_step "WAITING: Secondary mount not ready (Attempt $((D_COUNT + 1))/5)..."
         sleep 6
         ((D_COUNT++))
     done
@@ -365,6 +344,7 @@ if [[ "$NZB_MOUNT_ALIVE" == "false" ]]; then
 
     log_step "REBUILD: Unlocking RC Port $RC_PORT & terminating orphaned rclone processes..."
     fuser -k "${RC_PORT}/tcp" >/dev/null 2>&1 || true
+    pkill -9 -f "rclone mount $REMOTE_NAME" >/dev/null 2>&1 || true
 
     # Construct Dynamic RC Arguments
     if [[ -n "$RC_USER" ]] && [[ -n "$RC_PASS" ]]; then
@@ -400,20 +380,12 @@ if [[ "$NZB_MOUNT_ALIVE" == "false" ]]; then
     # Stabilization Verification Loop
     COUNT=0
     while [ $COUNT -lt 5 ]; do
-        if grep -q "$MOUNT_PATH" /etc/mtab && timeout 5s stat "$VALIDATION_FILE" >/dev/null 2>&1; then
+        if [ -f "$VALIDATION_FILE" ]; then
             log_step "REBUILD: Primary mount recovered successfully."
             send_notification "Mount Success" "Primary mount restored at $MOUNT_PATH" "normal"
             NZB_MOUNT_ALIVE=true
             NZB_STATE="UP"
             NZB_START_TS=$(date +%s)
-
-            log_step "REBUILD: Launching asynchronous background priming..."
-            (
-                find "$MEDIA_PATH" '(' -type f -o -type l ')' -print > /tmp/media_symlinks.txt 2>/dev/null
-                xargs -d '\n' -a /tmp/media_symlinks.txt -P 64 -n 1000 stat -L >/dev/null 2>&1
-                rm -f /tmp/media_symlinks.txt
-                logger "Rclone Priming: Background library warming complete."
-            ) 9>&- &
             break
         fi
         log_step "WAITING: Mount stabilizing (Attempt $((COUNT + 1))/5)..."
@@ -440,13 +412,13 @@ if [[ "$DEC_MOUNT_ALIVE" == "false" ]] && [[ -n "$DECYPH_PATH" ]]; then
     while [ $D_COUNT -lt 5 ]; do
         if check_decypharr_health >/dev/null 2>&1; then
             DEC_RECOVERED=true
-            log_step "REBUILD: Secondary mount and UI recovered successfully."
+            log_step "REBUILD: Secondary mount recovered successfully."
             DEC_STATE="UP"
             DEC_START_TS=$(date +%s)
             DEC_MOUNT_ALIVE=true
             break
         fi
-        log_step "WAITING: Secondary mount/UI stabilizing (Attempt $((D_COUNT + 1))/5)..."
+        log_step "WAITING: Secondary mount stabilizing (Attempt $((D_COUNT + 1))/5)..."
         sleep 6
         ((D_COUNT++))
     done
